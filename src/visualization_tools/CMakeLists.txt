@@ -46,6 +46,7 @@ install(
 ament_python_install_package(${PROJECT_NAME})
 
 install(PROGRAMS
+  scripts/analyze_path_optimization.py
   scripts/realTimePlot.py
   DESTINATION lib/${PROJECT_NAME}
 )

@@ -426,6 +426,61 @@ actual_path_length shortest_path_length
 actual_to_shortest_percent shortest_to_actual_percent
 ```
 
+## Path Optimization Report
+
+For requirement 5, the recommended workflow is:
+
+1. Run one simulation scene.
+2. Click one or more waypoints in RViz.
+3. Let the robot move so `path_metrics_<time>.txt` is recorded.
+4. Run the offline analyzer to generate figures and an HTML report.
+
+The report uses the obstacle-aware shortest path already computed by
+`visualization_tools` on the preview map. This means the "theoretical shortest
+path" is not a straight line through walls or obstacles; it is the shortest
+reachable path under the same traversability assumptions used in RViz.
+
+Run the analyzer on the latest path metric log:
+
+```bash
+python3 src/visualization_tools/scripts/analyze_path_optimization.py
+```
+
+Analyze all matching logs:
+
+```bash
+python3 src/visualization_tools/scripts/analyze_path_optimization.py --all
+```
+
+Outputs are written to:
+
+```text
+src/vehicle_simulator/log/path_optimization_report_<time>/
+```
+
+Generated files:
+
+```text
+report.html
+summary.csv
+summary.png
+segment_*.png
+```
+
+Interpretation:
+
+- `actual_to_shortest_percent = L_actual / L_shortest * 100`
+- pass condition: `actual_to_shortest_percent < 120`
+- equivalently: `shortest_to_actual_percent > 83.33`
+
+The HTML report shows:
+
+- summary statistics across all path segments
+- pass/fail status for each waypoint segment
+- bar charts for final ratios
+- per-segment time-history plots of actual path length, shortest path length,
+  and path optimization
+
 ## Troubleshooting
 
 ### RViz Has No OverallMap
