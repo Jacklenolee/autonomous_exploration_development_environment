@@ -2,13 +2,19 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <limits>
+#include <queue>
+#include <vector>
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/time.hpp"
 #include "builtin_interfaces/msg/time.hpp"
 
 #include "nav_msgs/msg/odometry.hpp"
+#include "nav_msgs/msg/path.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include <std_msgs/msg/float32.hpp>
 #include <geometry_msgs/msg/polygon_stamped.h>
@@ -37,12 +43,21 @@ const double PI = 3.1415926;
 
 string metricFile;
 string trajFile;
+string pathMetricFile;
 string mapFile;
 double overallMapVoxelSize = 0.5;
 double exploredAreaVoxelSize = 0.3;
 double exploredVolumeVoxelSize = 0.5;
 double transInterval = 0.2;
 double yawInterval = 10.0;
+double shortestPathGridResolution = 0.25;
+double shortestPathObstacleInflation = 0.6;
+double shortestPathObstacleMinZ = 0.2;
+double shortestPathObstacleMaxZ = 2.0;
+double shortestPathGroundMinZ = -0.3;
+double shortestPathGroundMaxZ = 0.3;
+double shortestPathGroundInflation = 0.3;
+double shortestPathNearestFreeRadius = 3.0;
 int overallMapDisplayInterval = 2;
 int overallMapDisplayCount = 0;
 int exploredAreaDisplayInterval = 1;
@@ -67,6 +82,17 @@ bool systemInited = false;
 float vehicleYaw = 0;
 float vehicleX = 0, vehicleY = 0, vehicleZ = 0;
 float exploredVolume = 0, travelingDis = 0, runtime = 0, timeDuration = 0;
+float pathStartX = 0, pathStartY = 0, pathStartZ = 0;
+float pathGoalX = 0, pathGoalY = 0, pathGoalZ = 0;
+float pathActualDis = 0, shortestPathDis = 0;
+float actualToShortestRatio = 0, pathOptimization = 0;
+bool shortestPathInited = false;
+bool shortestPathGridReady = false;
+int shortestPathGridWidth = 0, shortestPathGridHeight = 0;
+float shortestPathGridMinX = 0, shortestPathGridMinY = 0;
+float shortestPathFloorZ = 0;
+vector<unsigned char> shortestPathGrid;
+vector<geometry_msgs::msg::Point> shortestPathPoints;
 
 pcl::VoxelGrid<pcl::PointXYZ> overallMapDwzFilter;
 pcl::VoxelGrid<pcl::PointXYZI> exploredAreaDwzFilter;
@@ -78,14 +104,490 @@ shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pubExploredAreaPtr;
 
 shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pubTrajectoryPtr;
 
+shared_ptr<rclcpp::Publisher<nav_msgs::msg::Path>> pubShortestPathPtr;
+
 shared_ptr<rclcpp::Publisher<std_msgs::msg::Float32>> pubExploredVolumePtr;
 
 shared_ptr<rclcpp::Publisher<std_msgs::msg::Float32>> pubTravelingDisPtr;
 
 shared_ptr<rclcpp::Publisher<std_msgs::msg::Float32>> pubTimeDurationPtr;
 
+shared_ptr<rclcpp::Publisher<std_msgs::msg::Float32>> pubPathOptimizationPtr;
+
+shared_ptr<rclcpp::Publisher<std_msgs::msg::Float32>> pubActualToShortestRatioPtr;
+
 FILE *metricFilePtr = NULL;
 FILE *trajFilePtr = NULL;
+FILE *pathMetricFilePtr = NULL;
+
+void redirectInstallPathToSource(string& filePath)
+{
+  size_t installPos = filePath.find("/install/");
+  if (installPos != string::npos) {
+    filePath.replace(installPos, 8, "/src");
+  }
+}
+
+int gridIndex(int ix, int iy)
+{
+  return iy * shortestPathGridWidth + ix;
+}
+
+bool isInsideGrid(int ix, int iy)
+{
+  return ix >= 0 && ix < shortestPathGridWidth && iy >= 0 && iy < shortestPathGridHeight;
+}
+
+bool worldToGrid(float x, float y, int& ix, int& iy)
+{
+  ix = static_cast<int>(floor((x - shortestPathGridMinX) / shortestPathGridResolution));
+  iy = static_cast<int>(floor((y - shortestPathGridMinY) / shortestPathGridResolution));
+  return isInsideGrid(ix, iy);
+}
+
+geometry_msgs::msg::Point gridToWorld(int ix, int iy, float z)
+{
+  geometry_msgs::msg::Point point;
+  point.x = shortestPathGridMinX + (ix + 0.5) * shortestPathGridResolution;
+  point.y = shortestPathGridMinY + (iy + 0.5) * shortestPathGridResolution;
+  point.z = z;
+  return point;
+}
+
+bool isFreeCell(int ix, int iy)
+{
+  return isInsideGrid(ix, iy) && shortestPathGrid[gridIndex(ix, iy)] == 0;
+}
+
+bool findNearestFreeCell(int& ix, int& iy)
+{
+  if (isFreeCell(ix, iy)) {
+    return true;
+  }
+
+  int maxRadius = max(1, static_cast<int>(ceil(shortestPathNearestFreeRadius / shortestPathGridResolution)));
+  int bestX = ix;
+  int bestY = iy;
+  int bestDist2 = std::numeric_limits<int>::max();
+
+  for (int radius = 1; radius <= maxRadius; radius++) {
+    for (int dx = -radius; dx <= radius; dx++) {
+      for (int dy = -radius; dy <= radius; dy++) {
+        if (abs(dx) != radius && abs(dy) != radius) {
+          continue;
+        }
+
+        int nx = ix + dx;
+        int ny = iy + dy;
+        if (!isFreeCell(nx, ny)) {
+          continue;
+        }
+
+        int dist2 = dx * dx + dy * dy;
+        if (dist2 < bestDist2) {
+          bestDist2 = dist2;
+          bestX = nx;
+          bestY = ny;
+        }
+      }
+    }
+
+    if (bestDist2 != std::numeric_limits<int>::max()) {
+      ix = bestX;
+      iy = bestY;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool hasLineOfSight(int x0, int y0, int x1, int y1)
+{
+  int dx = abs(x1 - x0);
+  int sx = x0 < x1 ? 1 : -1;
+  int dy = -abs(y1 - y0);
+  int sy = y0 < y1 ? 1 : -1;
+  int error = dx + dy;
+
+  while (true) {
+    if (!isFreeCell(x0, y0)) {
+      return false;
+    }
+
+    if (x0 == x1 && y0 == y1) {
+      return true;
+    }
+
+    int error2 = 2 * error;
+    if (error2 >= dy) {
+      error += dy;
+      x0 += sx;
+    }
+    if (error2 <= dx) {
+      error += dx;
+      y0 += sy;
+    }
+  }
+}
+
+void buildShortestPathGrid()
+{
+  shortestPathGridReady = false;
+  shortestPathPoints.clear();
+
+  if (overallMapCloud->points.empty()) {
+    return;
+  }
+
+  float minX = overallMapCloud->points[0].x;
+  float maxX = overallMapCloud->points[0].x;
+  float minY = overallMapCloud->points[0].y;
+  float maxY = overallMapCloud->points[0].y;
+  float minZ = overallMapCloud->points[0].z;
+
+  for (const auto& point : overallMapCloud->points) {
+    minX = min(minX, point.x);
+    maxX = max(maxX, point.x);
+    minY = min(minY, point.y);
+    maxY = max(maxY, point.y);
+    minZ = min(minZ, point.z);
+  }
+
+  shortestPathFloorZ = minZ;
+  const float mapPadding = max(1.0, shortestPathNearestFreeRadius);
+  shortestPathGridMinX = minX - mapPadding;
+  shortestPathGridMinY = minY - mapPadding;
+  shortestPathGridWidth = static_cast<int>(ceil((maxX - minX + 2.0 * mapPadding) / shortestPathGridResolution));
+  shortestPathGridHeight = static_cast<int>(ceil((maxY - minY + 2.0 * mapPadding) / shortestPathGridResolution));
+
+  if (shortestPathGridWidth <= 0 || shortestPathGridHeight <= 0) {
+    return;
+  }
+
+  shortestPathGrid.assign(shortestPathGridWidth * shortestPathGridHeight, 1);
+  vector<unsigned char> rawObstacleGrid(shortestPathGridWidth * shortestPathGridHeight, 0);
+  vector<unsigned char> rawGroundGrid(shortestPathGridWidth * shortestPathGridHeight, 0);
+  vector<float> cellMinZ(shortestPathGridWidth * shortestPathGridHeight,
+                         std::numeric_limits<float>::infinity());
+
+  for (const auto& point : overallMapCloud->points) {
+    int ix, iy;
+    if (!worldToGrid(point.x, point.y, ix, iy)) {
+      continue;
+    }
+
+    int index = gridIndex(ix, iy);
+    cellMinZ[index] = min(cellMinZ[index], point.z);
+  }
+
+  for (const auto& point : overallMapCloud->points) {
+    int ix, iy;
+    if (!worldToGrid(point.x, point.y, ix, iy)) {
+      continue;
+    }
+
+    int index = gridIndex(ix, iy);
+    if (!std::isfinite(cellMinZ[index])) {
+      continue;
+    }
+
+    float localGroundZ = cellMinZ[index];
+    if (point.z >= localGroundZ + shortestPathGroundMinZ &&
+        point.z <= localGroundZ + shortestPathGroundMaxZ) {
+      rawGroundGrid[index] = 1;
+    }
+
+    if (point.z >= localGroundZ + shortestPathObstacleMinZ &&
+        point.z <= localGroundZ + shortestPathObstacleMaxZ) {
+      rawObstacleGrid[index] = 1;
+    }
+  }
+
+  int groundInflationCells = max(0, static_cast<int>(ceil(shortestPathGroundInflation / shortestPathGridResolution)));
+  int groundInflationCells2 = groundInflationCells * groundInflationCells;
+  for (int y = 0; y < shortestPathGridHeight; y++) {
+    for (int x = 0; x < shortestPathGridWidth; x++) {
+      if (rawGroundGrid[gridIndex(x, y)] == 0) {
+        continue;
+      }
+
+      for (int dy = -groundInflationCells; dy <= groundInflationCells; dy++) {
+        for (int dx = -groundInflationCells; dx <= groundInflationCells; dx++) {
+          if (dx * dx + dy * dy > groundInflationCells2) {
+            continue;
+          }
+
+          int nx = x + dx;
+          int ny = y + dy;
+          if (isInsideGrid(nx, ny)) {
+            shortestPathGrid[gridIndex(nx, ny)] = 0;
+          }
+        }
+      }
+    }
+  }
+
+  int inflationCells = max(0, static_cast<int>(ceil(shortestPathObstacleInflation / shortestPathGridResolution)));
+  int inflationCells2 = inflationCells * inflationCells;
+  for (int y = 0; y < shortestPathGridHeight; y++) {
+    for (int x = 0; x < shortestPathGridWidth; x++) {
+      if (rawObstacleGrid[gridIndex(x, y)] == 0) {
+        continue;
+      }
+
+      for (int dy = -inflationCells; dy <= inflationCells; dy++) {
+        for (int dx = -inflationCells; dx <= inflationCells; dx++) {
+          if (dx * dx + dy * dy > inflationCells2) {
+            continue;
+          }
+
+          int nx = x + dx;
+          int ny = y + dy;
+          if (isInsideGrid(nx, ny)) {
+            shortestPathGrid[gridIndex(nx, ny)] = 1;
+          }
+        }
+      }
+    }
+  }
+
+  shortestPathGridReady = true;
+}
+
+float computePolylineLength(const vector<geometry_msgs::msg::Point>& points)
+{
+  float length = 0;
+  for (size_t i = 1; i < points.size(); i++) {
+    float dx = points[i].x - points[i - 1].x;
+    float dy = points[i].y - points[i - 1].y;
+    float dz = points[i].z - points[i - 1].z;
+    length += sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  return length;
+}
+
+bool computeObstacleAwareShortestPath()
+{
+  shortestPathPoints.clear();
+  shortestPathDis = 0;
+
+  if (!shortestPathGridReady) {
+    return false;
+  }
+
+  int startX, startY, goalX, goalY;
+  if (!worldToGrid(pathStartX, pathStartY, startX, startY) ||
+      !worldToGrid(pathGoalX, pathGoalY, goalX, goalY)) {
+    return false;
+  }
+
+  if (!findNearestFreeCell(startX, startY) || !findNearestFreeCell(goalX, goalY)) {
+    return false;
+  }
+
+  const int cellCount = shortestPathGridWidth * shortestPathGridHeight;
+  const float inf = std::numeric_limits<float>::infinity();
+  vector<float> gScore(cellCount, inf);
+  vector<int> cameFrom(cellCount, -1);
+  vector<unsigned char> closed(cellCount, 0);
+
+  struct SearchNode {
+    int index;
+    float priority;
+    bool operator<(const SearchNode& other) const
+    {
+      return priority > other.priority;
+    }
+  };
+
+  auto heuristic = [&](int x, int y) {
+    float dx = static_cast<float>(x - goalX);
+    float dy = static_cast<float>(y - goalY);
+    return static_cast<float>(shortestPathGridResolution * sqrt(dx * dx + dy * dy));
+  };
+
+  int startIndex = gridIndex(startX, startY);
+  int goalIndex = gridIndex(goalX, goalY);
+  priority_queue<SearchNode> openSet;
+  gScore[startIndex] = 0;
+  openSet.push({startIndex, heuristic(startX, startY)});
+
+  const int neighborDx[8] = {1, 1, 0, -1, -1, -1, 0, 1};
+  const int neighborDy[8] = {0, 1, 1, 1, 0, -1, -1, -1};
+
+  while (!openSet.empty()) {
+    int currentIndex = openSet.top().index;
+    openSet.pop();
+
+    if (closed[currentIndex]) {
+      continue;
+    }
+
+    if (currentIndex == goalIndex) {
+      break;
+    }
+
+    closed[currentIndex] = 1;
+    int currentX = currentIndex % shortestPathGridWidth;
+    int currentY = currentIndex / shortestPathGridWidth;
+
+    for (int i = 0; i < 8; i++) {
+      int nx = currentX + neighborDx[i];
+      int ny = currentY + neighborDy[i];
+      if (!isFreeCell(nx, ny)) {
+        continue;
+      }
+
+      if (neighborDx[i] != 0 && neighborDy[i] != 0 &&
+          (!isFreeCell(currentX + neighborDx[i], currentY) ||
+           !isFreeCell(currentX, currentY + neighborDy[i]))) {
+        continue;
+      }
+
+      int neighborIndex = gridIndex(nx, ny);
+      if (closed[neighborIndex]) {
+        continue;
+      }
+
+      float stepCost = static_cast<float>((neighborDx[i] == 0 || neighborDy[i] == 0) ?
+                       shortestPathGridResolution : shortestPathGridResolution * sqrt(2.0));
+      float tentativeG = gScore[currentIndex] + stepCost;
+      if (tentativeG < gScore[neighborIndex]) {
+        cameFrom[neighborIndex] = currentIndex;
+        gScore[neighborIndex] = tentativeG;
+        openSet.push({neighborIndex, tentativeG + heuristic(nx, ny)});
+      }
+    }
+  }
+
+  if (!std::isfinite(gScore[goalIndex])) {
+    return false;
+  }
+
+  vector<int> rawPath;
+  for (int current = goalIndex; current != -1; current = cameFrom[current]) {
+    rawPath.push_back(current);
+    if (current == startIndex) {
+      break;
+    }
+  }
+
+  if (rawPath.empty() || rawPath.back() != startIndex) {
+    return false;
+  }
+
+  reverse(rawPath.begin(), rawPath.end());
+
+  vector<int> simplifiedPath;
+  size_t anchor = 0;
+  simplifiedPath.push_back(rawPath.front());
+  while (anchor < rawPath.size() - 1) {
+    size_t best = anchor + 1;
+    int anchorX = rawPath[anchor] % shortestPathGridWidth;
+    int anchorY = rawPath[anchor] / shortestPathGridWidth;
+    for (size_t candidate = rawPath.size() - 1; candidate > anchor; candidate--) {
+      int candidateX = rawPath[candidate] % shortestPathGridWidth;
+      int candidateY = rawPath[candidate] / shortestPathGridWidth;
+      if (hasLineOfSight(anchorX, anchorY, candidateX, candidateY)) {
+        best = candidate;
+        break;
+      }
+    }
+    simplifiedPath.push_back(rawPath[best]);
+    anchor = best;
+  }
+
+  for (size_t i = 0; i < simplifiedPath.size(); i++) {
+    int ix = simplifiedPath[i] % shortestPathGridWidth;
+    int iy = simplifiedPath[i] / shortestPathGridWidth;
+    float z = pathStartZ + (pathGoalZ - pathStartZ) * static_cast<float>(i) /
+              static_cast<float>(max<size_t>(1, simplifiedPath.size() - 1));
+    shortestPathPoints.push_back(gridToWorld(ix, iy, z));
+  }
+
+  if (!shortestPathPoints.empty()) {
+    shortestPathPoints.front().x = pathStartX;
+    shortestPathPoints.front().y = pathStartY;
+    shortestPathPoints.front().z = pathStartZ;
+    shortestPathPoints.back().x = pathGoalX;
+    shortestPathPoints.back().y = pathGoalY;
+    shortestPathPoints.back().z = pathGoalZ;
+  }
+
+  shortestPathDis = computePolylineLength(shortestPathPoints);
+  return shortestPathPoints.size() >= 2 && shortestPathDis > 1e-3;
+}
+
+void publishShortestPath(const builtin_interfaces::msg::Time& stamp)
+{
+  if (!shortestPathInited || shortestPathPoints.size() < 2) {
+    return;
+  }
+
+  nav_msgs::msg::Path shortestPath;
+  shortestPath.header.stamp = stamp;
+  shortestPath.header.frame_id = "map";
+  shortestPath.poses.resize(shortestPathPoints.size());
+
+  for (size_t i = 0; i < shortestPathPoints.size(); i++) {
+    shortestPath.poses[i].header = shortestPath.header;
+    shortestPath.poses[i].pose.position = shortestPathPoints[i];
+    shortestPath.poses[i].pose.orientation.w = 1.0;
+  }
+
+  pubShortestPathPtr->publish(shortestPath);
+}
+
+void updatePathOptimization()
+{
+  if (!shortestPathInited || shortestPathDis < 1e-3 || pathActualDis < 1e-3) {
+    actualToShortestRatio = 0;
+    pathOptimization = 0;
+    return;
+  }
+
+  actualToShortestRatio = 100.0 * pathActualDis / shortestPathDis;
+  pathOptimization = 100.0 * shortestPathDis / pathActualDis;
+}
+
+void publishPathMetrics()
+{
+  if (!shortestPathInited) {
+    return;
+  }
+
+  std_msgs::msg::Float32 pathOptimizationMsg;
+  pathOptimizationMsg.data = pathOptimization;
+  pubPathOptimizationPtr->publish(pathOptimizationMsg);
+
+  std_msgs::msg::Float32 actualToShortestRatioMsg;
+  actualToShortestRatioMsg.data = actualToShortestRatio;
+  pubActualToShortestRatioPtr->publish(actualToShortestRatioMsg);
+}
+
+void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr waypoint)
+{
+  pathStartX = vehicleX;
+  pathStartY = vehicleY;
+  pathStartZ = vehicleZ;
+  pathGoalX = waypoint->point.x;
+  pathGoalY = waypoint->point.y;
+  pathGoalZ = waypoint->point.z;
+  pathActualDis = 0;
+  shortestPathPoints.clear();
+  shortestPathInited = computeObstacleAwareShortestPath();
+
+  if (!shortestPathInited) {
+    RCLCPP_WARN(rclcpp::get_logger("visualizationTools"),
+                "Failed to compute obstacle-aware shortest path from waypoint. Check map bounds, obstacle filters, or goal reachability.");
+    shortestPathDis = 0;
+  }
+
+  updatePathOptimization();
+  publishShortestPath(waypoint->header.stamp);
+  publishPathMetrics();
+}
 
 void odometryHandler(const nav_msgs::msg::Odometry::ConstSharedPtr odom)
 {
@@ -129,6 +631,10 @@ void odometryHandler(const nav_msgs::msg::Odometry::ConstSharedPtr odom)
   }
 
   travelingDis += dis;
+  if (shortestPathInited) {
+    pathActualDis += dis;
+    updatePathOptimization();
+  }
 
   vehicleYaw = yaw;
   vehicleX = odom->pose.pose.position.x;
@@ -149,6 +655,15 @@ void odometryHandler(const nav_msgs::msg::Odometry::ConstSharedPtr odom)
   trajectory2.header.stamp = odom->header.stamp;
   trajectory2.header.frame_id = "map";
   pubTrajectoryPtr->publish(trajectory2);
+
+  publishShortestPath(odom->header.stamp);
+  publishPathMetrics();
+
+  if (pathMetricFilePtr != NULL && shortestPathInited) {
+    fprintf(pathMetricFilePtr, "%f %f %f %f %f %f %f %f %f %f %f\n",
+            timeDuration, pathStartX, pathStartY, pathStartZ, pathGoalX, pathGoalY, pathGoalZ,
+            pathActualDis, shortestPathDis, actualToShortestRatio, pathOptimization);
+  }
 }
 
 void laserCloudHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr laserCloudIn)
@@ -224,29 +739,48 @@ int main(int argc, char** argv)
 
   nh->declare_parameter<std::string>("metricFile", metricFile);
   nh->declare_parameter<std::string>("trajFile", trajFile);
+  nh->declare_parameter<std::string>("pathMetricFile", pathMetricFile);
   nh->declare_parameter<std::string>("mapFile", mapFile);
   nh->declare_parameter<double>("overallMapVoxelSize", overallMapVoxelSize);
   nh->declare_parameter<double>("exploredAreaVoxelSize", exploredAreaVoxelSize);
   nh->declare_parameter<double>("exploredVolumeVoxelSize", exploredVolumeVoxelSize);
   nh->declare_parameter<double>("transInterval", transInterval);
   nh->declare_parameter<double>("yawInterval", yawInterval);
+  nh->declare_parameter<double>("shortestPathGridResolution", shortestPathGridResolution);
+  nh->declare_parameter<double>("shortestPathObstacleInflation", shortestPathObstacleInflation);
+  nh->declare_parameter<double>("shortestPathObstacleMinZ", shortestPathObstacleMinZ);
+  nh->declare_parameter<double>("shortestPathObstacleMaxZ", shortestPathObstacleMaxZ);
+  nh->declare_parameter<double>("shortestPathGroundMinZ", shortestPathGroundMinZ);
+  nh->declare_parameter<double>("shortestPathGroundMaxZ", shortestPathGroundMaxZ);
+  nh->declare_parameter<double>("shortestPathGroundInflation", shortestPathGroundInflation);
+  nh->declare_parameter<double>("shortestPathNearestFreeRadius", shortestPathNearestFreeRadius);
   nh->declare_parameter<int>("overallMapDisplayInterval", overallMapDisplayInterval);
   nh->declare_parameter<int>("exploredAreaDisplayInterval", exploredAreaDisplayInterval);
 
   nh->get_parameter("metricFile", metricFile);
   nh->get_parameter("trajFile", trajFile);
+  nh->get_parameter("pathMetricFile", pathMetricFile);
   nh->get_parameter("mapFile", mapFile);
   nh->get_parameter("overallMapVoxelSize", overallMapVoxelSize);
   nh->get_parameter("exploredAreaVoxelSize", exploredAreaVoxelSize);
   nh->get_parameter("exploredVolumeVoxelSize", exploredVolumeVoxelSize);
   nh->get_parameter("transInterval", transInterval);
   nh->get_parameter("yawInterval", yawInterval);
+  nh->get_parameter("shortestPathGridResolution", shortestPathGridResolution);
+  nh->get_parameter("shortestPathObstacleInflation", shortestPathObstacleInflation);
+  nh->get_parameter("shortestPathObstacleMinZ", shortestPathObstacleMinZ);
+  nh->get_parameter("shortestPathObstacleMaxZ", shortestPathObstacleMaxZ);
+  nh->get_parameter("shortestPathGroundMinZ", shortestPathGroundMinZ);
+  nh->get_parameter("shortestPathGroundMaxZ", shortestPathGroundMaxZ);
+  nh->get_parameter("shortestPathGroundInflation", shortestPathGroundInflation);
+  nh->get_parameter("shortestPathNearestFreeRadius", shortestPathNearestFreeRadius);
   nh->get_parameter("overallMapDisplayInterval", overallMapDisplayInterval);
   nh->get_parameter("exploredAreaDisplayInterval", exploredAreaDisplayInterval);
 
   // No direct replacement present for $(find pkg) in ROS2. Edit file path.
-  metricFile.replace(metricFile.find("/install/"), 8, "/src");
-  trajFile.replace(trajFile.find("/install/"), 8, "/src");
+  redirectInstallPathToSource(metricFile);
+  redirectInstallPathToSource(trajFile);
+  redirectInstallPathToSource(pathMetricFile);
 
   auto subOdometry = nh->create_subscription<nav_msgs::msg::Odometry>("/state_estimation", 5, odometryHandler);
 
@@ -254,17 +788,25 @@ int main(int argc, char** argv)
 
   auto subRuntime = nh->create_subscription<std_msgs::msg::Float32>("/runtime", 5, runtimeHandler);
 
+  auto subWaypoint = nh->create_subscription<geometry_msgs::msg::PointStamped>("/way_point", 5, waypointHandler);
+
   auto pubOverallMap = nh->create_publisher<sensor_msgs::msg::PointCloud2>("/overall_map", 5);
 
   pubExploredAreaPtr = nh->create_publisher<sensor_msgs::msg::PointCloud2>("/explored_areas", 5);
 
   pubTrajectoryPtr = nh->create_publisher<sensor_msgs::msg::PointCloud2>("/trajectory", 5);
+
+  pubShortestPathPtr = nh->create_publisher<nav_msgs::msg::Path>("/shortest_path", 5);
   
   pubExploredVolumePtr = nh->create_publisher<std_msgs::msg::Float32>("/explored_volume", 5);
 
   pubTravelingDisPtr = nh->create_publisher<std_msgs::msg::Float32>("/traveling_distance", 5);
 
   pubTimeDurationPtr = nh->create_publisher<std_msgs::msg::Float32>("/time_duration", 5);
+
+  pubPathOptimizationPtr = nh->create_publisher<std_msgs::msg::Float32>("/path_optimization", 5);
+
+  pubActualToShortestRatioPtr = nh->create_publisher<std_msgs::msg::Float32>("/actual_to_shortest_ratio", 5);
 
   overallMapDwzFilter.setLeafSize(overallMapVoxelSize, overallMapVoxelSize, overallMapVoxelSize);
   exploredAreaDwzFilter.setLeafSize(exploredAreaVoxelSize, exploredAreaVoxelSize, exploredAreaVoxelSize);
@@ -273,6 +815,11 @@ int main(int argc, char** argv)
   pcl::PLYReader ply_reader;
   if (ply_reader.read(mapFile, *overallMapCloud) == -1) {
     RCLCPP_INFO(nh->get_logger(), "Couldn't read pointcloud.ply file.");
+  }
+
+  buildShortestPathGrid();
+  if (!shortestPathGridReady) {
+    RCLCPP_WARN(nh->get_logger(), "Failed to build obstacle grid for shortest path.");
   }
 
   overallMapCloudDwz->clear();
@@ -289,8 +836,14 @@ int main(int argc, char** argv)
 
   metricFile += "_" + timeString + ".txt";
   trajFile += "_" + timeString + ".txt";
+  pathMetricFile += "_" + timeString + ".txt";
   metricFilePtr = fopen(metricFile.c_str(), "w");
   trajFilePtr = fopen(trajFile.c_str(), "w");
+  pathMetricFilePtr = fopen(pathMetricFile.c_str(), "w");
+  if (pathMetricFilePtr != NULL) {
+    fprintf(pathMetricFilePtr,
+            "# time_duration start_x start_y start_z goal_x goal_y goal_z actual_path_length shortest_path_length actual_to_shortest_percent shortest_to_actual_percent\n");
+  }
 
   rclcpp::Rate rate(100);
   bool status = rclcpp::ok();
@@ -311,6 +864,9 @@ int main(int argc, char** argv)
 
   fclose(metricFilePtr);
   fclose(trajFilePtr);
+  if (pathMetricFilePtr != NULL) {
+    fclose(pathMetricFilePtr);
+  }
 
   RCLCPP_INFO(nh->get_logger(), "Exploration metrics and vehicle trajectory are saved in 'src/vehicle_simulator/log'.");
 

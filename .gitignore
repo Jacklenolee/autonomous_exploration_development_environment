@@ -13,6 +13,9 @@ log/*
 .DS_Store
 
 src/vehicle_simulator/mesh/*
+!src/vehicle_simulator/mesh/lrae_scene_*/
+!src/vehicle_simulator/mesh/lrae_scene_*/preview/
+!src/vehicle_simulator/mesh/lrae_scene_*/preview/pointcloud.ply
 
 !src/vehicle_simulator/mesh/matterport
 

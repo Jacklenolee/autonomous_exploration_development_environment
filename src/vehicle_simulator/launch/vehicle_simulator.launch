@@ -2,15 +2,12 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, RegisterEventHandler
+from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch.substitutions import Command, LaunchConfiguration
-
-def declare_world_action(context, world_name):
-  world_name_str = str(world_name.perform(context))
-  declare_world = DeclareLaunchArgument('world', default_value=[os.path.join(get_package_share_directory('vehicle_simulator'), 'world', world_name_str + '.world')], description='')
-  return [declare_world]
+from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 
 def generate_launch_description():
   sensorOffsetX = LaunchConfiguration('sensorOffsetX')
@@ -40,6 +37,8 @@ def generate_launch_description():
   record = LaunchConfiguration('record')
   verbose = LaunchConfiguration('verbose')
   world_name = LaunchConfiguration('world_name')
+  vehicle_spawn_z = PythonExpression([terrainZ, ' + ', vehicleHeight])
+  camera_spawn_z = PythonExpression([terrainZ, ' + ', vehicleHeight, ' + ', cameraOffsetZ])
 
   declare_sensorOffsetX = DeclareLaunchArgument('sensorOffsetX', default_value='0.0', description='')
   declare_sensorOffsetY = DeclareLaunchArgument('sensorOffsetY', default_value='0.0', description='')
@@ -68,6 +67,14 @@ def generate_launch_description():
   declare_record = DeclareLaunchArgument('record', default_value='false', description='')
   declare_verbose = DeclareLaunchArgument('verbose', default_value='false', description='')
   declare_world_name = DeclareLaunchArgument('world_name', default_value='garage', description='')
+  declare_world = DeclareLaunchArgument(
+    'world',
+    default_value=[os.path.join(get_package_share_directory('vehicle_simulator'), 'world', ''), world_name, '.world'],
+    description=''
+  )
+  ros_python_env = {
+    'PATH': '/usr/bin:' + os.environ.get('PATH', '')
+  }
   
   lidar_xacro = os.path.join(get_package_share_directory('vehicle_simulator'), 'urdf', 'lidar.urdf.xacro')
   lidar_description = Command(['xacro',' ', lidar_xacro])
@@ -88,7 +95,13 @@ def generate_launch_description():
     arguments=[
       '-entity', 'lidar',
       '-topic', 'robot_description',
+      '-x', vehicleX,
+      '-y', vehicleY,
+      '-z', vehicle_spawn_z,
+      '-Y', vehicleYaw,
+      '-timeout', '120.0',
     ],
+    additional_env=ros_python_env,
     output='screen',
   )
 
@@ -98,8 +111,14 @@ def generate_launch_description():
     executable='spawn_entity.py',
     arguments=[
       '-file', robot_xacro,
-      '-entity', 'robot'
+      '-entity', 'robot',
+      '-x', vehicleX,
+      '-y', vehicleY,
+      '-z', vehicle_spawn_z,
+      '-Y', vehicleYaw,
+      '-timeout', '120.0',
     ],
+    additional_env=ros_python_env,
     output='screen',
   )
 
@@ -109,14 +128,48 @@ def generate_launch_description():
     executable='spawn_entity.py',
     arguments=[
       '-file', camera_xacro,
-      '-entity', 'camera'
+      '-entity', 'camera',
+      '-x', vehicleX,
+      '-y', vehicleY,
+      '-z', camera_spawn_z,
+      '-Y', vehicleYaw,
+      '-timeout', '120.0',
       ],
+      additional_env=ros_python_env,
       output='screen'
   )
 
-  start_gazebo = IncludeLaunchDescription(
+  start_gazebo_server = IncludeLaunchDescription(
     PythonLaunchDescriptionSource(os.path.join(
-      get_package_share_directory('gazebo_ros'), 'launch', 'gazebo.launch.py'))
+      get_package_share_directory('gazebo_ros'), 'launch', 'gzserver.launch.py')
+    ),
+    launch_arguments={
+      'world': LaunchConfiguration('world'),
+      'pause': pause,
+      'record': record,
+      'verbose': verbose,
+    }.items()
+  )
+
+  start_gazebo_client = IncludeLaunchDescription(
+    PythonLaunchDescriptionSource(os.path.join(
+      get_package_share_directory('gazebo_ros'), 'launch', 'gzclient.launch.py')
+    ),
+    condition=IfCondition(gui),
+    launch_arguments={
+      'verbose': verbose,
+    }.items()
+  )
+
+  wait_for_gazebo_ready = ExecuteProcess(
+    cmd=[
+      '/bin/bash',
+      '-lc',
+      'until ros2 topic info /model_states >/dev/null 2>&1; do sleep 0.5; done; '
+      'ros2 topic echo --once /model_states gazebo_msgs/msg/ModelStates >/dev/null',
+    ],
+    additional_env=ros_python_env,
+    output='log',
   )
 
   start_vehicle_simulator = Node(
@@ -152,11 +205,32 @@ def generate_launch_description():
       output='screen'
   )
 
-  delayed_start_vehicle_simulator = TimerAction(
-    period=5.0,
-    actions=[
-      start_vehicle_simulator
-    ]
+  spawn_robot_after_gazebo_ready = RegisterEventHandler(
+    OnProcessExit(
+      target_action=wait_for_gazebo_ready,
+      on_exit=[spawn_robot],
+    )
+  )
+
+  spawn_camera_after_robot = RegisterEventHandler(
+    OnProcessExit(
+      target_action=spawn_robot,
+      on_exit=[spawn_camera],
+    )
+  )
+
+  spawn_lidar_after_camera = RegisterEventHandler(
+    OnProcessExit(
+      target_action=spawn_camera,
+      on_exit=[spawn_lidar],
+    )
+  )
+
+  start_vehicle_simulator_after_lidar = RegisterEventHandler(
+    OnProcessExit(
+      target_action=spawn_lidar,
+      on_exit=[start_vehicle_simulator],
+    )
   )
 
   ld = LaunchDescription()
@@ -189,13 +263,15 @@ def generate_launch_description():
   ld.add_action(declare_record)
   ld.add_action(declare_verbose)
   ld.add_action(declare_world_name)
-  ld.add_action(OpaqueFunction(function=declare_world_action, args=[world_name]))
+  ld.add_action(declare_world)
 
-  ld.add_action(start_gazebo)
+  ld.add_action(start_gazebo_server)
+  ld.add_action(start_gazebo_client)
   ld.add_action(start_lidar_state_publisher)
-  ld.add_action(spawn_lidar)
-  ld.add_action(spawn_robot)
-  ld.add_action(spawn_camera)
-  ld.add_action(delayed_start_vehicle_simulator)
+  ld.add_action(spawn_robot_after_gazebo_ready)
+  ld.add_action(spawn_camera_after_robot)
+  ld.add_action(spawn_lidar_after_camera)
+  ld.add_action(start_vehicle_simulator_after_lidar)
+  ld.add_action(wait_for_gazebo_ready)
 
   return ld

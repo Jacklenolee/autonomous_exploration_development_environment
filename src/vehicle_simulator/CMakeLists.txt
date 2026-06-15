@@ -54,6 +54,7 @@ install(
   launch
   log
   mesh
+  scripts
   rviz
   urdf
   world

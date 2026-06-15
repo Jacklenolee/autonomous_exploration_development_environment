@@ -1,0 +1,27 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+
+
+def generate_launch_description():
+  return LaunchDescription([
+    DeclareLaunchArgument('world_name', default_value='lrae_scene_2', description=''),
+    DeclareLaunchArgument('vehicleX', default_value='-27.0', description=''),
+    DeclareLaunchArgument('vehicleY', default_value='-27.0', description=''),
+    DeclareLaunchArgument('terrainZ', default_value='0.3', description=''),
+    IncludeLaunchDescription(
+      PythonLaunchDescriptionSource(os.path.join(
+        get_package_share_directory('vehicle_simulator'), 'launch', 'system_garage.launch')
+      ),
+      launch_arguments={
+        'world_name': LaunchConfiguration('world_name'),
+        'vehicleX': LaunchConfiguration('vehicleX'),
+        'vehicleY': LaunchConfiguration('vehicleY'),
+        'terrainZ': LaunchConfiguration('terrainZ'),
+      }.items()
+    )
+  ])
