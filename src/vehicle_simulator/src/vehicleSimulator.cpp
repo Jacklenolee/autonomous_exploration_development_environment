@@ -2,8 +2,12 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
+#include <string>
+#include <vector>
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/time.hpp"
 #include "rclcpp/clock.hpp"
@@ -32,6 +36,7 @@
 #include <opencv2/highgui/highgui.hpp>
 
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/io/ply_io.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
@@ -64,6 +69,13 @@ int minTerrainPointNumIncl = 500;
 double smoothRateIncl = 0.2;
 double InclFittingThre = 0.2;
 double maxIncl = 30.0;
+string terrainMapTopic = "/terrain_map_ext";
+string terrainMapFile = "";
+bool useTerrainMapFallback = true;
+double terrainMapLookupRadius = 2.0;
+double terrainMapGroundQuantile = 0.35;
+int minTerrainMapPointNum = 20;
+int terrainMapUpdateSkip = 10;
 
 const int systemDelay = 5;
 int systemInitCount = 0;
@@ -73,6 +85,11 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr scanData(new pcl::PointCloud<pcl::PointXYZI
 pcl::PointCloud<pcl::PointXYZI>::Ptr terrainCloud(new pcl::PointCloud<pcl::PointXYZI>());
 pcl::PointCloud<pcl::PointXYZI>::Ptr terrainCloudIncl(new pcl::PointCloud<pcl::PointXYZI>());
 pcl::PointCloud<pcl::PointXYZI>::Ptr terrainCloudDwz(new pcl::PointCloud<pcl::PointXYZI>());
+pcl::PointCloud<pcl::PointXYZ>::Ptr terrainMapCloud(new pcl::PointCloud<pcl::PointXYZ>());
+pcl::KdTreeFLANN<pcl::PointXYZ> terrainMapKdTree;
+std::vector<float> terrainMapElevations;
+bool terrainMapReady = false;
+int terrainMapUpdateCount = 0;
 
 std::vector<int> scanInd;
 
@@ -108,6 +125,102 @@ int odomRecIDPointer = 0;
 pcl::VoxelGrid<pcl::PointXYZI> terrainDwzFilter;
 
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubScanPointer;
+
+bool estimateGroundElevationFromZValues(std::vector<float>& elevValues, float& elev)
+{
+  if (elevValues.empty())
+  {
+    return false;
+  }
+
+  std::sort(elevValues.begin(), elevValues.end());
+  int quantileID = static_cast<int>(terrainMapGroundQuantile * static_cast<double>(elevValues.size()));
+  if (quantileID < 0)
+    quantileID = 0;
+  else if (quantileID >= static_cast<int>(elevValues.size()))
+    quantileID = static_cast<int>(elevValues.size()) - 1;
+
+  elev = elevValues[quantileID];
+  return true;
+}
+
+bool estimateGroundElevationFromReferenceMap(float x, float y, float& elev)
+{
+  if (!terrainMapReady || terrainMapCloud->empty())
+  {
+    return false;
+  }
+
+  pcl::PointXYZ searchPoint;
+  searchPoint.x = x;
+  searchPoint.y = y;
+  searchPoint.z = 0.0;
+
+  std::vector<int> pointIdxRadiusSearch;
+  std::vector<float> pointRadiusSquaredDistance;
+  int pointCount = terrainMapKdTree.radiusSearch(searchPoint, terrainMapLookupRadius, pointIdxRadiusSearch,
+                                                 pointRadiusSquaredDistance);
+  if (pointCount < minTerrainMapPointNum)
+  {
+    return false;
+  }
+
+  std::vector<float> elevValues;
+  elevValues.reserve(pointCount);
+  for (int i = 0; i < pointCount; i++)
+  {
+    elevValues.push_back(terrainMapElevations[pointIdxRadiusSearch[i]]);
+  }
+
+  return estimateGroundElevationFromZValues(elevValues, elev);
+}
+
+bool loadTerrainReferenceMap(const rclcpp::Logger& logger)
+{
+  if (terrainMapFile.empty())
+  {
+    RCLCPP_WARN(logger, "terrainMapFile is empty, terrain fallback is disabled.");
+    return false;
+  }
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr rawCloud(new pcl::PointCloud<pcl::PointXYZ>());
+  if (pcl::io::loadPLYFile(terrainMapFile, *rawCloud) < 0 || rawCloud->empty())
+  {
+    RCLCPP_WARN(logger, "Failed to load terrain fallback map: %s", terrainMapFile.c_str());
+    return false;
+  }
+
+  terrainMapCloud->clear();
+  terrainMapElevations.clear();
+  terrainMapCloud->reserve(rawCloud->size());
+  terrainMapElevations.reserve(rawCloud->size());
+  for (const auto& rawPoint : rawCloud->points)
+  {
+    if (!std::isfinite(rawPoint.x) || !std::isfinite(rawPoint.y) || !std::isfinite(rawPoint.z))
+    {
+      continue;
+    }
+
+    pcl::PointXYZ point;
+    point.x = rawPoint.x;
+    point.y = rawPoint.y;
+    point.z = 0.0;
+    terrainMapCloud->push_back(point);
+    terrainMapElevations.push_back(rawPoint.z);
+  }
+
+  if (terrainMapCloud->empty())
+  {
+    RCLCPP_WARN(logger, "Terrain fallback map has no valid points: %s", terrainMapFile.c_str());
+    return false;
+  }
+
+  terrainMapKdTree.setInputCloud(terrainMapCloud);
+  terrainMapReady = true;
+  RCLCPP_INFO(logger, "Loaded terrain fallback map with %zu points: %s", terrainMapCloud->size(),
+              terrainMapFile.c_str());
+  return true;
+}
 
 void scanHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr scanIn)
 {
@@ -197,26 +310,18 @@ void terrainCloudHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr ter
   pcl::PointXYZI point;
   terrainCloudIncl->clear();
   int terrainCloudSize = terrainCloud->points.size();
-  double elevMean = 0;
-  int elevCount = 0;
-  bool terrainValid = true;
+  float elevMean = terrainZ;
+  std::vector<float> elevValues;
+  bool terrainValidZ = false;
   for (int i = 0; i < terrainCloudSize; i++)
   {
     point = terrainCloud->points[i];
 
     float dis = sqrt((point.x - vehicleX) * (point.x - vehicleX) + (point.y - vehicleY) * (point.y - vehicleY));
 
-    if (dis < terrainRadiusZ)
+    if (dis < terrainRadiusZ && point.intensity < groundHeightThre)
     {
-      if (point.intensity < groundHeightThre)
-      {
-        elevMean += point.z;
-        elevCount++;
-      }
-      else
-      {
-        terrainValid = false;
-      }
+      elevValues.push_back(point.z);
     }
 
     if (dis < terrainRadiusIncl && point.intensity < groundHeightThre)
@@ -225,12 +330,12 @@ void terrainCloudHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr ter
     }
   }
 
-  if (elevCount >= minTerrainPointNumZ)
-    elevMean /= elevCount;
-  else
-    terrainValid = false;
+  if (static_cast<int>(elevValues.size()) >= minTerrainPointNumZ)
+  {
+    terrainValidZ = estimateGroundElevationFromZValues(elevValues, elevMean);
+  }
 
-  if (terrainValid && adjustZ)
+  if (terrainValidZ && adjustZ)
   {
     terrainZ = (1.0 - smoothRateZ) * terrainZ + smoothRateZ * elevMean;
   }
@@ -240,7 +345,7 @@ void terrainCloudHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr ter
   terrainDwzFilter.filter(*terrainCloudDwz);
   int terrainCloudDwzSize = terrainCloudDwz->points.size();
 
-  if (terrainCloudDwzSize < minTerrainPointNumIncl || !terrainValid)
+  if (terrainCloudDwzSize < minTerrainPointNumIncl || !terrainValidZ)
   {
     return;
   }
@@ -290,10 +395,10 @@ void terrainCloudHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr ter
   if (inlierNum < minTerrainPointNumIncl || fabs(matX.at<float>(0, 0)) > maxIncl * PI / 180.0 ||
       fabs(matX.at<float>(1, 0)) > maxIncl * PI / 180.0)
   {
-    terrainValid = false;
+    return;
   }
 
-  if (terrainValid && adjustIncl)
+  if (adjustIncl)
   {
     terrainPitch = (1.0 - smoothRateIncl) * terrainPitch + smoothRateIncl * matX.at<float>(0, 0);
     terrainRoll = (1.0 - smoothRateIncl) * terrainRoll + smoothRateIncl * matX.at<float>(1, 0);
@@ -326,11 +431,20 @@ int main(int argc, char** argv)
   nh->declare_parameter<bool>("adjustZ", adjustZ);
   nh->declare_parameter<double>("terrainRadiusZ", terrainRadiusZ);
   nh->declare_parameter<int>("minTerrainPointNumZ", minTerrainPointNumZ);
+  nh->declare_parameter<double>("smoothRateZ", smoothRateZ);
   nh->declare_parameter<bool>("adjustIncl", adjustIncl);
   nh->declare_parameter<double>("terrainRadiusIncl", terrainRadiusIncl);
   nh->declare_parameter<int>("minTerrainPointNumIncl", minTerrainPointNumIncl);
+  nh->declare_parameter<double>("smoothRateIncl", smoothRateIncl);
   nh->declare_parameter<double>("InclFittingThre", InclFittingThre);
   nh->declare_parameter<double>("maxIncl", maxIncl);
+  nh->declare_parameter<string>("terrainMapTopic", terrainMapTopic);
+  nh->declare_parameter<string>("terrainMapFile", terrainMapFile);
+  nh->declare_parameter<bool>("useTerrainMapFallback", useTerrainMapFallback);
+  nh->declare_parameter<double>("terrainMapLookupRadius", terrainMapLookupRadius);
+  nh->declare_parameter<double>("terrainMapGroundQuantile", terrainMapGroundQuantile);
+  nh->declare_parameter<int>("minTerrainMapPointNum", minTerrainMapPointNum);
+  nh->declare_parameter<int>("terrainMapUpdateSkip", terrainMapUpdateSkip);
 
   nh->get_parameter("use_gazebo_time", use_gazebo_time);
   nh->get_parameter("cameraOffsetZ", cameraOffsetZ);
@@ -347,15 +461,24 @@ int main(int argc, char** argv)
   nh->get_parameter("adjustZ", adjustZ);
   nh->get_parameter("terrainRadiusZ", terrainRadiusZ);
   nh->get_parameter("minTerrainPointNumZ", minTerrainPointNumZ);
+  nh->get_parameter("smoothRateZ", smoothRateZ);
   nh->get_parameter("adjustIncl", adjustIncl);
   nh->get_parameter("terrainRadiusIncl", terrainRadiusIncl);
   nh->get_parameter("minTerrainPointNumIncl", minTerrainPointNumIncl);
+  nh->get_parameter("smoothRateIncl", smoothRateIncl);
   nh->get_parameter("InclFittingThre", InclFittingThre);
   nh->get_parameter("maxIncl", maxIncl);
+  nh->get_parameter("terrainMapTopic", terrainMapTopic);
+  nh->get_parameter("terrainMapFile", terrainMapFile);
+  nh->get_parameter("useTerrainMapFallback", useTerrainMapFallback);
+  nh->get_parameter("terrainMapLookupRadius", terrainMapLookupRadius);
+  nh->get_parameter("terrainMapGroundQuantile", terrainMapGroundQuantile);
+  nh->get_parameter("minTerrainMapPointNum", minTerrainMapPointNum);
+  nh->get_parameter("terrainMapUpdateSkip", terrainMapUpdateSkip);
 
   auto subScan = nh->create_subscription<sensor_msgs::msg::PointCloud2>("/velodyne_points", 2, scanHandler);
 
-  auto subTerrainCloud = nh->create_subscription<sensor_msgs::msg::PointCloud2>("/terrain_map", 2, terrainCloudHandler);
+  auto subTerrainCloud = nh->create_subscription<sensor_msgs::msg::PointCloud2>(terrainMapTopic, 2, terrainCloudHandler);
 
   auto subSpeed = nh->create_subscription<geometry_msgs::msg::TwistStamped>("/cmd_vel", 5, speedHandler);
 
@@ -382,8 +505,13 @@ int main(int argc, char** argv)
   pubScanPointer = nh->create_publisher<sensor_msgs::msg::PointCloud2>("/registered_scan", 2);
 
   terrainDwzFilter.setLeafSize(terrainVoxelSize, terrainVoxelSize, terrainVoxelSize);
+  if (useTerrainMapFallback)
+  {
+    loadTerrainReferenceMap(nh->get_logger());
+  }
 
-  RCLCPP_INFO(nh->get_logger(), "Simulation started.");
+  RCLCPP_INFO(nh->get_logger(), "Simulation started. terrainMapTopic=%s adjustZ=%s adjustIncl=%s",
+              terrainMapTopic.c_str(), adjustZ ? "true" : "false", adjustIncl ? "true" : "false");
   
   rclcpp::Rate rate(200);
   bool status = rclcpp::ok();
@@ -406,6 +534,21 @@ int main(int argc, char** argv)
                 0.005 * vehicleYawRate * (-sin(vehicleYaw) * sensorOffsetX - cos(vehicleYaw) * sensorOffsetY);
     vehicleY += 0.005 * sin(vehicleYaw) * vehicleSpeed +
                 0.005 * vehicleYawRate * (cos(vehicleYaw) * sensorOffsetX - sin(vehicleYaw) * sensorOffsetY);
+
+    if (adjustZ && useTerrainMapFallback && terrainMapReady)
+    {
+      terrainMapUpdateCount++;
+      if (terrainMapUpdateCount >= std::max(1, terrainMapUpdateSkip))
+      {
+        terrainMapUpdateCount = 0;
+        float mapTerrainZ = terrainZ;
+        if (estimateGroundElevationFromReferenceMap(vehicleX, vehicleY, mapTerrainZ))
+        {
+          terrainZ = (1.0 - smoothRateZ) * terrainZ + smoothRateZ * mapTerrainZ;
+        }
+      }
+    }
+
     vehicleZ = terrainZ + vehicleHeight;
 
     odomTime = nh->now();

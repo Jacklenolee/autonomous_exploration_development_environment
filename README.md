@@ -10,6 +10,11 @@ This enhanced version adds LRAE scenes, more realistic Gazebo contact settings,
 RViz obstacle-aware shortest-path visualization, and path-planning optimality
 metrics.
 
+This version also fixes the common issue where the vehicle gradually sinks
+below uneven terrain in Gazebo. The simulator now follows extended terrain
+points from `/terrain_map_ext` and falls back to each world's preview point
+cloud if live terrain points become sparse.
+
 ## What Changed Compared With The Original Repository
 
 ### 1. Added LRAE Simulation Scenes
@@ -89,6 +94,18 @@ poses through Gazebo entity state updates. It is more realistic than the
 original zero-gravity setup, but it is still not a full wheel-joint dynamics
 controller.
 
+Important note about terrain following:
+
+- Gazebo gravity, collision, and friction are now more realistic than the
+  original repository.
+- But `vehicleSimulator` still updates entity poses directly with
+  `/set_entity_state`, so the robot is not held up by wheel contact alone.
+- Because of that, correct terrain-height estimation is essential on slopes,
+  hills, LRAE outdoor terrain, forest, and campus scenes.
+- This repository now uses two terrain sources for height following:
+  `1.` live `/terrain_map_ext` ground points
+  `2.` preview `mesh/<world_name>/preview/pointcloud.ply` fallback lookup
+
 ### 3. More Robust Gazebo Launch Sequence
 
 `vehicle_simulator.launch` now:
@@ -103,6 +120,17 @@ controller.
 
 This prevents common startup problems where the vehicle appears floating,
 spawns too early, or sensor models fail to attach correctly.
+
+It also now passes terrain-following parameters explicitly into
+`vehicleSimulator`, including:
+
+- `terrainMapTopic` with default `/terrain_map_ext`
+- `terrainMapFile` with default `mesh/<world_name>/preview/pointcloud.ply`
+- `useTerrainMapFallback`
+- `terrainMapLookupRadius`
+- `terrainMapGroundQuantile`
+- `minTerrainMapPointNum`
+- `terrainMapUpdateSkip`
 
 ### 4. Added Obstacle-Aware Shortest Path In RViz
 
@@ -469,6 +497,33 @@ The model spawn height is:
 ```text
 terrainZ + vehicleHeight
 ```
+
+If the vehicle later sinks into terrain while driving, the root cause is
+usually terrain tracking, not Gazebo gravity itself. This repository now
+handles that by:
+
+- subscribing to `/terrain_map_ext` instead of only `/terrain_map`
+- ignoring obstacle-height points when estimating local ground
+- using quantile ground estimation instead of a simple mean
+- falling back to the preview point cloud for all supported worlds
+
+Useful launch overrides:
+
+```bash
+ros2 launch vehicle_simulator system_lrae_scene_1.launch \
+  terrainRadiusZ:=2.0 \
+  smoothRateZ:=0.8 \
+  terrainMapLookupRadius:=2.0 \
+  terrainMapGroundQuantile:=0.35
+```
+
+If a custom world has no preview point cloud, generate or provide:
+
+```text
+src/vehicle_simulator/mesh/<world_name>/preview/pointcloud.ply
+```
+
+Otherwise the fallback terrain lookup cannot help that world.
 
 ### Multiple Simulations On One Machine
 
