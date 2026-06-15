@@ -31,13 +31,6 @@ def generate_launch_description():
   smoothRateIncl = LaunchConfiguration('smoothRateIncl')
   InclFittingThre = LaunchConfiguration('InclFittingThre')
   maxIncl = LaunchConfiguration('maxIncl')
-  terrainMapTopic = LaunchConfiguration('terrainMapTopic')
-  terrainMapFile = LaunchConfiguration('terrainMapFile')
-  useTerrainMapFallback = LaunchConfiguration('useTerrainMapFallback')
-  terrainMapLookupRadius = LaunchConfiguration('terrainMapLookupRadius')
-  terrainMapGroundQuantile = LaunchConfiguration('terrainMapGroundQuantile')
-  minTerrainMapPointNum = LaunchConfiguration('minTerrainMapPointNum')
-  terrainMapUpdateSkip = LaunchConfiguration('terrainMapUpdateSkip')
   pause = LaunchConfiguration('pause')
   use_sim_time = LaunchConfiguration('use_sim_time')
   gui = LaunchConfiguration('gui')
@@ -59,26 +52,15 @@ def generate_launch_description():
   declare_terrainVoxelSize = DeclareLaunchArgument('terrainVoxelSize', default_value='0.05', description='')
   declare_groundHeightThre = DeclareLaunchArgument('groundHeightThre', default_value='0.1', description='')
   declare_adjustZ = DeclareLaunchArgument('adjustZ', default_value='true', description='')
-  declare_terrainRadiusZ = DeclareLaunchArgument('terrainRadiusZ', default_value='2.0', description='')
+  declare_terrainRadiusZ = DeclareLaunchArgument('terrainRadiusZ', default_value='1.0', description='')
   declare_minTerrainPointNumZ = DeclareLaunchArgument('minTerrainPointNumZ', default_value='5', description='')
-  declare_smoothRateZ = DeclareLaunchArgument('smoothRateZ', default_value='0.8', description='')
+  declare_smoothRateZ = DeclareLaunchArgument('smoothRateZ', default_value='0.5', description='')
   declare_adjustIncl = DeclareLaunchArgument('adjustIncl', default_value='true', description='')
-  declare_terrainRadiusIncl = DeclareLaunchArgument('terrainRadiusIncl', default_value='2.5', description='')
-  declare_minTerrainPointNumIncl = DeclareLaunchArgument('minTerrainPointNumIncl', default_value='80', description='')
+  declare_terrainRadiusIncl = DeclareLaunchArgument('terrainRadiusIncl', default_value='2.0', description='')
+  declare_minTerrainPointNumIncl = DeclareLaunchArgument('minTerrainPointNumIncl', default_value='200', description='')
   declare_smoothRateIncl = DeclareLaunchArgument('smoothRateIncl', default_value='0.5', description='')
   declare_InclFittingThre = DeclareLaunchArgument('InclFittingThre', default_value='0.2', description='')
   declare_maxIncl = DeclareLaunchArgument('maxIncl', default_value='30.0', description='')
-  declare_terrainMapTopic = DeclareLaunchArgument('terrainMapTopic', default_value='/terrain_map_ext', description='')
-  declare_terrainMapFile = DeclareLaunchArgument(
-    'terrainMapFile',
-    default_value=[os.path.join(get_package_share_directory('vehicle_simulator'), 'mesh', ''), world_name, '/preview/pointcloud.ply'],
-    description=''
-  )
-  declare_useTerrainMapFallback = DeclareLaunchArgument('useTerrainMapFallback', default_value='true', description='')
-  declare_terrainMapLookupRadius = DeclareLaunchArgument('terrainMapLookupRadius', default_value='2.0', description='')
-  declare_terrainMapGroundQuantile = DeclareLaunchArgument('terrainMapGroundQuantile', default_value='0.35', description='')
-  declare_minTerrainMapPointNum = DeclareLaunchArgument('minTerrainMapPointNum', default_value='20', description='')
-  declare_terrainMapUpdateSkip = DeclareLaunchArgument('terrainMapUpdateSkip', default_value='10', description='')
   declare_pause = DeclareLaunchArgument('pause', default_value='false', description='')
   declare_use_sim_time = DeclareLaunchArgument('use_sim_time', default_value='false', description='')
   declare_gui = DeclareLaunchArgument('gui', default_value='false', description='')
@@ -217,13 +199,6 @@ def generate_launch_description():
         'smoothRateIncl': smoothRateIncl,
         'InclFittingThre': InclFittingThre,
         'maxIncl': maxIncl,
-        'terrainMapTopic': terrainMapTopic,
-        'terrainMapFile': terrainMapFile,
-        'useTerrainMapFallback': useTerrainMapFallback,
-        'terrainMapLookupRadius': terrainMapLookupRadius,
-        'terrainMapGroundQuantile': terrainMapGroundQuantile,
-        'minTerrainMapPointNum': minTerrainMapPointNum,
-        'terrainMapUpdateSkip': terrainMapUpdateSkip,
         'use_sim_time': use_sim_time
       }
       ],
@@ -282,13 +257,6 @@ def generate_launch_description():
   ld.add_action(declare_smoothRateIncl)
   ld.add_action(declare_InclFittingThre)
   ld.add_action(declare_maxIncl)
-  ld.add_action(declare_terrainMapTopic)
-  ld.add_action(declare_terrainMapFile)
-  ld.add_action(declare_useTerrainMapFallback)
-  ld.add_action(declare_terrainMapLookupRadius)
-  ld.add_action(declare_terrainMapGroundQuantile)
-  ld.add_action(declare_minTerrainMapPointNum)
-  ld.add_action(declare_terrainMapUpdateSkip)
   ld.add_action(declare_pause)
   ld.add_action(declare_use_sim_time)
   ld.add_action(declare_gui)
