@@ -93,6 +93,7 @@ float shortestPathGridMinX = 0, shortestPathGridMinY = 0;
 float shortestPathFloorZ = 0;
 vector<unsigned char> shortestPathGrid;
 vector<geometry_msgs::msg::Point> shortestPathPoints;
+vector<geometry_msgs::msg::PoseStamped> shortestPathHistory;
 
 pcl::VoxelGrid<pcl::PointXYZ> overallMapDwzFilter;
 pcl::VoxelGrid<pcl::PointXYZI> exploredAreaDwzFilter;
@@ -105,6 +106,8 @@ shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pubExploredAreaPtr;
 shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pubTrajectoryPtr;
 
 shared_ptr<rclcpp::Publisher<nav_msgs::msg::Path>> pubShortestPathPtr;
+
+shared_ptr<rclcpp::Publisher<nav_msgs::msg::Path>> pubShortestPathHistoryPtr;
 
 shared_ptr<rclcpp::Publisher<std_msgs::msg::Float32>> pubExploredVolumePtr;
 
@@ -227,6 +230,35 @@ bool hasLineOfSight(int x0, int y0, int x1, int y1)
     if (error2 <= dx) {
       error += dx;
       y0 += sy;
+    }
+  }
+}
+
+void appendShortestPathToHistory()
+{
+  if (shortestPathPoints.size() < 2) {
+    return;
+  }
+
+  for (size_t i = 0; i < shortestPathPoints.size(); i++) {
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = "map";
+    pose.pose.position = shortestPathPoints[i];
+    pose.pose.orientation.w = 1.0;
+
+    bool skipPoint = false;
+    if (!shortestPathHistory.empty()) {
+      const auto& lastPoint = shortestPathHistory.back().pose.position;
+      float dx = pose.pose.position.x - lastPoint.x;
+      float dy = pose.pose.position.y - lastPoint.y;
+      float dz = pose.pose.position.z - lastPoint.z;
+      if (dx * dx + dy * dy + dz * dz < 1e-6) {
+        skipPoint = true;
+      }
+    }
+
+    if (!skipPoint) {
+      shortestPathHistory.push_back(pose);
     }
   }
 }
@@ -521,22 +553,27 @@ bool computeObstacleAwareShortestPath()
 
 void publishShortestPath(const builtin_interfaces::msg::Time& stamp)
 {
-  if (!shortestPathInited || shortestPathPoints.size() < 2) {
-    return;
-  }
-
   nav_msgs::msg::Path shortestPath;
   shortestPath.header.stamp = stamp;
   shortestPath.header.frame_id = "map";
-  shortestPath.poses.resize(shortestPathPoints.size());
+  if (shortestPathInited && shortestPathPoints.size() >= 2) {
+    shortestPath.poses.resize(shortestPathPoints.size());
 
-  for (size_t i = 0; i < shortestPathPoints.size(); i++) {
-    shortestPath.poses[i].header = shortestPath.header;
-    shortestPath.poses[i].pose.position = shortestPathPoints[i];
-    shortestPath.poses[i].pose.orientation.w = 1.0;
+    for (size_t i = 0; i < shortestPathPoints.size(); i++) {
+      shortestPath.poses[i].header = shortestPath.header;
+      shortestPath.poses[i].pose.position = shortestPathPoints[i];
+      shortestPath.poses[i].pose.orientation.w = 1.0;
+    }
   }
-
   pubShortestPathPtr->publish(shortestPath);
+
+  nav_msgs::msg::Path shortestPathHistoryMsg;
+  shortestPathHistoryMsg.header = shortestPath.header;
+  shortestPathHistoryMsg.poses = shortestPathHistory;
+  for (auto& pose : shortestPathHistoryMsg.poses) {
+    pose.header = shortestPathHistoryMsg.header;
+  }
+  pubShortestPathHistoryPtr->publish(shortestPathHistoryMsg);
 }
 
 void updatePathOptimization()
@@ -575,13 +612,19 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
   pathGoalY = waypoint->point.y;
   pathGoalZ = waypoint->point.z;
   pathActualDis = 0;
-  shortestPathPoints.clear();
+  vector<geometry_msgs::msg::Point> previousShortestPathPoints = shortestPathPoints;
+  float previousShortestPathDis = shortestPathDis;
+  bool previousShortestPathInited = shortestPathInited;
   shortestPathInited = computeObstacleAwareShortestPath();
 
   if (!shortestPathInited) {
     RCLCPP_WARN(rclcpp::get_logger("visualizationTools"),
                 "Failed to compute obstacle-aware shortest path from waypoint. Check map bounds, obstacle filters, or goal reachability.");
-    shortestPathDis = 0;
+    shortestPathPoints = previousShortestPathPoints;
+    shortestPathDis = previousShortestPathDis;
+    shortestPathInited = previousShortestPathInited;
+  } else {
+    appendShortestPathToHistory();
   }
 
   updatePathOptimization();
@@ -797,6 +840,7 @@ int main(int argc, char** argv)
   pubTrajectoryPtr = nh->create_publisher<sensor_msgs::msg::PointCloud2>("/trajectory", 5);
 
   pubShortestPathPtr = nh->create_publisher<nav_msgs::msg::Path>("/shortest_path", 5);
+  pubShortestPathHistoryPtr = nh->create_publisher<nav_msgs::msg::Path>("/shortest_path_history", 5);
   
   pubExploredVolumePtr = nh->create_publisher<std_msgs::msg::Float32>("/explored_volume", 5);
 
