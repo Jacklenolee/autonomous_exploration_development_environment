@@ -1,20 +1,22 @@
-# Autonomous Exploration Development Environment - Enhanced ROS 2 Humble Version
+# 自主探索开发环境 - ROS 2 Humble 增强版
 
-This repository is based on the original
-`autonomous_exploration_development_environment` and keeps its core ground robot
-autonomous navigation stack: Gazebo simulation, terrain analysis, local path
-planning, waypoint following, sensor simulation, RViz visualization, and metric
-logging.
+本仓库基于原始 `autonomous_exploration_development_environment` 改造，保留了其核心能力：
 
-This enhanced version adds LRAE scenes, more realistic Gazebo contact settings,
-RViz obstacle-aware shortest-path visualization, and path-planning optimality
-metrics.
+- Gazebo 仿真
+- 地形分析
+- 局部路径规划
+- 路径跟踪控制
+- 传感器数据仿真
+- RViz 可视化
+- 指标日志记录
 
-## What Changed Compared With The Original Repository
+在此基础上，当前版本新增了 LRAE 场景、更加真实的 Gazebo 环境设置、RViz 中的障碍物约束最短路径显示、路径优化度日志，以及离线可视化分析脚本。
 
-### 1. Added LRAE Simulation Scenes
+## 1. 与原始仓库相比新增了什么
 
-New launch files:
+### 1.1 新增 LRAE 场景
+
+新增启动命令：
 
 ```bash
 ros2 launch vehicle_simulator system_lrae_scene_1.launch
@@ -23,7 +25,7 @@ ros2 launch vehicle_simulator system_lrae_scene_3.launch
 ros2 launch vehicle_simulator system_lrae_scene_4.launch
 ```
 
-New world files:
+新增 world 文件：
 
 ```text
 src/vehicle_simulator/world/lrae_scene_1.world
@@ -32,16 +34,16 @@ src/vehicle_simulator/world/lrae_scene_3.world
 src/vehicle_simulator/world/lrae_scene_4.world
 ```
 
-Default LRAE initial poses:
+默认初始位姿：
 
-| Launch file | World | Initial `(x, y, terrainZ)` |
+| 启动文件 | 世界文件 | 初始 `(x, y, terrainZ)` |
 | --- | --- | --- |
 | `system_lrae_scene_1.launch` | `lrae_scene_1.world` | `(-14, -14, 0.3)` |
 | `system_lrae_scene_2.launch` | `lrae_scene_2.world` | `(-27, -27, 0.3)` |
 | `system_lrae_scene_3.launch` | `lrae_scene_3.world` | `(-18, -20, 0.0)` |
 | `system_lrae_scene_4.launch` | `lrae_scene_4.world` | `(0, 0, 0.0)` |
 
-Each LRAE scene also has a generated preview point cloud:
+每个 LRAE 场景都额外生成了 preview 点云：
 
 ```text
 src/vehicle_simulator/mesh/lrae_scene_1/preview/pointcloud.ply
@@ -50,19 +52,21 @@ src/vehicle_simulator/mesh/lrae_scene_3/preview/pointcloud.ply
 src/vehicle_simulator/mesh/lrae_scene_4/preview/pointcloud.ply
 ```
 
-These files are required by `/overall_map` and by the obstacle-aware A*
-shortest-path calculation.
+这些 preview 点云会被以下功能使用：
 
-### 2. Improved Gazebo Realism
+- RViz 中的 `/overall_map`
+- A* 障碍物约束最短路径 `/shortest_path`
+- 路径优化度指标计算
 
-The original simulator worlds used zero gravity in several scenes. This version
-sets Earth gravity:
+### 1.2 改进 Gazebo 真实感
+
+多个场景从原始的零重力改为了地球重力：
 
 ```xml
 <gravity>0 0 -9.81</gravity>
 ```
 
-Updated worlds include:
+更新过的 world 包括：
 
 ```text
 garage.world
@@ -76,68 +80,45 @@ lrae_scene_3.world
 lrae_scene_4.world
 ```
 
-The robot SDF was also improved:
+`robot.sdf` 也做了增强：
 
-- added non-static robot model setting
-- added realistic mass and inertia
-- added body collision geometry
-- added wheel collision geometry
-- added wheel/body friction and contact parameters
+- 增加非静态模型设置
+- 增加更合理的质量和惯量
+- 增加车体碰撞几何
+- 增加轮子碰撞几何
+- 增加摩擦和接触参数
 
-Important note: the simulator still drives `robot`, `lidar`, and `camera`
-poses through Gazebo entity state updates. It is more realistic than the
-original zero-gravity setup, but it is still not a full wheel-joint dynamics
-controller.
+注意：
 
-### 3. More Robust Gazebo Launch Sequence
+- 这个仓库里的 `vehicleSimulator` 仍然是通过 Gazebo 的 `/set_entity_state` 更新车体、激光雷达和相机位置。
+- 因此它更适合做导航、感知、指标评估和算法验证。
+- 它不是完整的轮地动力学仿真平台。
 
-`vehicle_simulator.launch` now:
+### 1.3 新增 RViz 最短路径显示
 
-- starts `gzserver` and `gzclient` separately
-- supports `gui:=true/false`
-- waits until Gazebo `/model_states` is ready
-- spawns robot, camera, and lidar in order
-- starts `vehicleSimulator` only after models are spawned
-- spawns models at `terrainZ + vehicleHeight` instead of directly at terrain
-  height
+原始 RViz 主要显示：
 
-This prevents common startup problems where the vehicle appears floating,
-spawns too early, or sensor models fail to attach correctly.
+- `/path`：实际局部规划路径
+- `/trajectory`：实际行驶轨迹
+- `/overall_map`：全局 preview 点云
 
-### 4. Added Obstacle-Aware Shortest Path In RViz
-
-Original RViz already showed:
-
-- `/path`: planner path
-- `/trajectory`: actual traveled trajectory
-- `/overall_map`: global preview map
-
-This version adds:
+当前版本新增：
 
 ```text
 /shortest_path
 ```
 
-RViz display name:
+RViz 中显示名称为：
 
 ```text
 ShortestPath
 ```
 
-It is drawn as an orange path in RViz.
+它不是简单直线，而是基于 preview 点云构建的 2D 占据栅格，在考虑障碍物后用 A* 算法求出的可达最短路径。
 
-The shortest path is not a simple straight line. It is computed by A* on a
-2D occupancy grid built from the preview point cloud:
+### 1.4 新增路径优化度日志
 
-- local ground cells define traversable support
-- obstacle-height points define blocked cells
-- obstacles are inflated by a safety radius
-- A* searches the shortest reachable path from the vehicle pose to the waypoint
-- the result is published as `nav_msgs/msg/Path` on `/shortest_path`
-
-### 5. Added Path Planning Optimality Metrics
-
-After selecting a waypoint, `visualization_tools` records:
+每次点击 RViz 的目标点后，系统会记录：
 
 ```text
 L_actual
@@ -146,85 +127,74 @@ L_actual / L_shortest * 100
 L_shortest / L_actual * 100
 ```
 
-Output file:
+输出文件：
 
 ```text
 src/vehicle_simulator/log/path_metrics_<time>.txt
 ```
 
-Columns:
-
-```text
-time_duration
-start_x start_y start_z
-goal_x goal_y goal_z
-actual_path_length
-shortest_path_length
-actual_to_shortest_percent
-shortest_to_actual_percent
-```
-
-For the common requirement "actual path length should be lower than 120% of the
-shortest path", use:
+判定方式：
 
 ```text
 actual_to_shortest_percent = L_actual / L_shortest * 100 < 120
 ```
 
-Equivalently:
+等价形式：
 
 ```text
 shortest_to_actual_percent = L_shortest / L_actual * 100 > 83.33
 ```
 
-### 6. Added LRAE Preview Map Generator
+### 1.5 新增离线路径优化度报告脚本
 
-New script:
-
-```text
-src/vehicle_simulator/scripts/generate_lrae_preview_maps.py
-```
-
-It parses the LRAE `.world` files, samples collision geometry, and regenerates:
+新增脚本：
 
 ```text
-mesh/lrae_scene_*/preview/pointcloud.ply
+src/visualization_tools/scripts/analyze_path_optimization.py
 ```
 
-Use it after editing any LRAE world:
+它会自动读取 `path_metrics_*.txt`，生成：
 
-```bash
-python3 src/vehicle_simulator/scripts/generate_lrae_preview_maps.py
-colcon build --packages-select vehicle_simulator
-```
+- `summary.csv`
+- `summary.png`
+- `segment_*.png`
+- `report.html`
 
-## Repository Structure
+最推荐的分析方式是直接打开 HTML 报告，因为它同时包含：
 
-Important packages:
+- 总体统计
+- 每段路径的通过/失败判定
+- 最终柱状图
+- 随时间变化的长度与优化度曲线
+
+## 2. 代码结构
+
+关键功能包如下：
 
 ```text
 src/vehicle_simulator
-src/visualization_tools
 src/local_planner
 src/terrain_analysis
 src/terrain_analysis_ext
 src/sensor_scan_generation
+src/visualization_tools
 ```
 
-Important modified files:
+关键代码文件：
 
 ```text
-src/vehicle_simulator/launch/vehicle_simulator.launch
-src/vehicle_simulator/launch/system_lrae_scene_*.launch
-src/vehicle_simulator/urdf/robot.sdf
-src/vehicle_simulator/rviz/vehicle_simulator.rviz
+src/vehicle_simulator/src/vehicleSimulator.cpp
+src/local_planner/src/localPlanner.cpp
+src/local_planner/src/pathFollower.cpp
+src/terrain_analysis/src/terrainAnalysis.cpp
+src/terrain_analysis_ext/src/terrainAnalysisExt.cpp
 src/visualization_tools/src/visualizationTools.cpp
-src/visualization_tools/launch/visualization_tools.launch
+src/visualization_tools/scripts/analyze_path_optimization.py
 ```
 
-## Dependencies
+## 3. 依赖环境
 
-Recommended environment:
+推荐环境：
 
 - Ubuntu 22.04
 - ROS 2 Humble
@@ -233,9 +203,13 @@ Recommended environment:
 - PCL
 - OpenCV
 - xacro
-- `assimp` and Python `trimesh` only if regenerating LRAE preview maps
 
-Install common dependencies:
+如果需要重新生成 LRAE preview 点云，还需要：
+
+- `assimp`
+- Python `trimesh`
+
+常用依赖安装：
 
 ```bash
 sudo apt update
@@ -250,15 +224,15 @@ sudo apt install -y \
   assimp-utils
 ```
 
-If `trimesh` is missing:
+如果缺少 `trimesh`：
 
 ```bash
 python3 -m pip install trimesh
 ```
 
-## Build
+## 4. 编译
 
-From the repository root:
+在仓库根目录执行：
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -266,47 +240,49 @@ colcon build
 source install/setup.bash
 ```
 
-For faster rebuilds after changing only these packages:
+如果只改了局部功能，快速重编译可用：
 
 ```bash
 source /opt/ros/humble/setup.bash
-colcon build --packages-select vehicle_simulator visualization_tools
+colcon build --packages-select vehicle_simulator visualization_tools local_planner
 source install/setup.bash
 ```
 
-## Run Existing Scenes
+## 5. 启动仿真
 
-Garage:
+### 5.1 原始场景
+
+Garage：
 
 ```bash
 ros2 launch vehicle_simulator system_garage.launch
 ```
 
-Indoor:
+Indoor：
 
 ```bash
 ros2 launch vehicle_simulator system_indoor.launch
 ```
 
-Tunnel:
+Tunnel：
 
 ```bash
 ros2 launch vehicle_simulator system_tunnel.launch
 ```
 
-Forest:
+Forest：
 
 ```bash
 ros2 launch vehicle_simulator system_forest.launch
 ```
 
-Campus:
+Campus：
 
 ```bash
 ros2 launch vehicle_simulator system_campus.launch
 ```
 
-## Run LRAE Scenes
+### 5.2 LRAE 场景
 
 ```bash
 ros2 launch vehicle_simulator system_lrae_scene_1.launch
@@ -315,145 +291,91 @@ ros2 launch vehicle_simulator system_lrae_scene_3.launch
 ros2 launch vehicle_simulator system_lrae_scene_4.launch
 ```
 
-Disable Gazebo GUI if needed:
+关闭 Gazebo GUI：
 
 ```bash
 ros2 launch vehicle_simulator system_lrae_scene_1.launch gazebo_gui:=false
 ```
 
-Override initial pose:
+覆盖初始位姿：
 
 ```bash
 ros2 launch vehicle_simulator system_lrae_scene_1.launch \
   vehicleX:=-10.0 vehicleY:=-12.0 terrainZ:=0.3 vehicleYaw:=0.0
 ```
 
-## RViz Usage
+## 6. RViz 可视化怎么用
 
-When a system launch file starts, RViz opens with the configured displays.
+系统启动后，RViz 会自动打开，并加载 `vehicle_simulator.rviz`。
 
-Useful displays:
+常用显示项：
 
-| RViz Display | Topic | Meaning |
+| RViz 显示名称 | 话题 | 含义 |
 | --- | --- | --- |
-| `OverallMap` | `/overall_map` | Preview point-cloud map |
-| `Path` | `/path` | Planner output path |
-| `ShortestPath` | `/shortest_path` | A* obstacle-aware shortest path |
-| `Trajectory` | `/trajectory` | Actual traveled trajectory |
-| `Waypoint` | `/way_point` | Clicked target point |
+| `OverallMap` | `/overall_map` | 预生成全局点云地图 |
+| `RegScan` | `/registered_scan` | 已配准到地图坐标系的扫描点云 |
+| `TerrainMap` | `/terrain_map` | 局部地形分析结果 |
+| `TerrainMapExt` | `/terrain_map_ext` | 扩展地形图 |
+| `Path` | `/path` | 实际局部规划器输出路径 |
+| `ShortestPath` | `/shortest_path` | A* 障碍物约束最短路径 |
+| `Trajectory` | `/trajectory` | 车辆实际行驶轨迹 |
+| `FreePaths` | `/free_paths` | 当前可行候选路径集合 |
+| `Waypoint` | `/way_point` | 目标点工具 |
+| `Boundary` | `/navigation_boundary` | 人工导航边界 |
+| `AddedObstacles` | `/added_obstacles` | 手工增加障碍物 |
 
-Workflow:
+推荐使用流程：
 
-1. Start one scene.
-2. Wait for RViz and Gazebo to finish loading.
-3. Select the `Waypoint` tool in RViz.
-4. Click a target point in the map.
-5. The planner publishes `/path`.
-6. The vehicle trajectory is recorded on `/trajectory`.
-7. The obstacle-aware ideal shortest path is published on `/shortest_path`.
-8. The path optimality metrics are written to `path_metrics_<time>.txt`.
+1. 启动某个场景。
+2. 等 Gazebo、RViz、点云和路径显示都稳定。
+3. 在 RViz 左上角切换到 `Waypoint` 工具。
+4. 在地图中点击目标点。
+5. 系统会发布 `/way_point`。
+6. 实际导航路径会显示在 `/path`。
+7. A* 最短路径会显示在 `/shortest_path`。
+8. 实际车辆轨迹会显示在 `/trajectory`。
+9. 路径优化度日志会写入 `path_metrics_<time>.txt`。
 
-## How The Shortest Path Is Computed
+你在 RViz 中观察路径优化时，最关键的可视化对象通常是：
 
-The shortest-path reference is generated in
-`src/visualization_tools/src/visualizationTools.cpp`.
+- `Path`：算法真实执行的路径
+- `ShortestPath`：理论最短可达路径
+- `Trajectory`：车辆真实走过的轨迹
+- `OverallMap`：路径参考底图
 
-Main steps:
+## 7. 路径优化度日志与可视化分析
 
-1. Load `mesh/<world_name>/preview/pointcloud.ply`.
-2. Build a 2D occupancy grid.
-3. Estimate local ground from the lowest point in each grid cell.
-4. Mark traversable ground cells.
-5. Mark obstacle cells from points above local ground.
-6. Inflate obstacles by `shortestPathObstacleInflation`.
-7. When `/way_point` is received, record current vehicle pose as start.
-8. Run A* from start to goal.
-9. Publish the resulting `nav_msgs/msg/Path` on `/shortest_path`.
-10. Accumulate actual traveled distance from odometry and write metrics.
+### 7.1 日志什么时候新建
 
-Important parameters are in:
+当前实现是：
 
-```text
-src/visualization_tools/launch/visualization_tools.launch
-```
+- 每次启动 `visualizationTools` 节点时，会创建一份新的 `path_metrics_<time>.txt`
+- 同一次 Gazebo/RViz 运行里，如果你点击多个 waypoint，它们会继续写入同一个日志文件
+- 关闭后重新启动，才会创建下一份新的日志
 
-Defaults:
-
-```xml
-<param name="shortestPathGridResolution" value="0.25" />
-<param name="shortestPathObstacleInflation" value="0.6" />
-<param name="shortestPathObstacleMinZ" value="0.2" />
-<param name="shortestPathObstacleMaxZ" value="2.0" />
-<param name="shortestPathGroundMinZ" value="-0.3" />
-<param name="shortestPathGroundMaxZ" value="0.3" />
-<param name="shortestPathGroundInflation" value="0.3" />
-<param name="shortestPathNearestFreeRadius" value="3.0" />
-```
-
-## Logs
-
-Logs are saved under:
-
-```text
-src/vehicle_simulator/log
-```
-
-Files:
-
-```text
-metrics_<time>.txt
-trajectory_<time>.txt
-path_metrics_<time>.txt
-```
-
-`metrics_<time>.txt`:
-
-```text
-explored_volume traveling_distance runtime time_duration
-```
-
-`trajectory_<time>.txt`:
-
-```text
-x y z roll pitch yaw time_duration
-```
-
-`path_metrics_<time>.txt`:
-
-```text
-time_duration start_x start_y start_z goal_x goal_y goal_z
-actual_path_length shortest_path_length
-actual_to_shortest_percent shortest_to_actual_percent
-```
-
-## Path Optimization Report
-
-For requirement 5, the recommended workflow is:
-
-1. Run one simulation scene.
-2. Click one or more waypoints in RViz.
-3. Let the robot move so `path_metrics_<time>.txt` is recorded.
-4. Run the offline analyzer to generate figures and an HTML report.
-
-The report uses the obstacle-aware shortest path already computed by
-`visualization_tools` on the preview map. This means the "theoretical shortest
-path" is not a straight line through walls or obstacles; it is the shortest
-reachable path under the same traversability assumptions used in RViz.
-
-Run the analyzer on the latest path metric log:
+### 7.2 如何分析最新一份日志
 
 ```bash
 python3 src/visualization_tools/scripts/analyze_path_optimization.py
 ```
 
-Analyze one specific log:
+### 7.3 如何分析指定某一次日志
+
+可以直接指定完整路径：
 
 ```bash
 python3 src/visualization_tools/scripts/analyze_path_optimization.py \
   src/vehicle_simulator/log/path_metrics_2026-6-15-23-7-42.txt
 ```
 
-Analyze several specific logs together:
+也可以只写文件名：
+
+```bash
+python3 src/visualization_tools/scripts/analyze_path_optimization.py \
+  path_metrics_2026-6-15-23-7-42.txt
+```
+
+### 7.4 如何一次分析多份日志
 
 ```bash
 python3 src/visualization_tools/scripts/analyze_path_optimization.py \
@@ -461,19 +383,21 @@ python3 src/visualization_tools/scripts/analyze_path_optimization.py \
   path_metrics_2026-6-15-23-1-14.txt
 ```
 
-Analyze all matching logs:
+### 7.5 如何分析所有日志
 
 ```bash
 python3 src/visualization_tools/scripts/analyze_path_optimization.py --all
 ```
 
-Outputs are written to:
+### 7.6 分析输出在哪里
+
+输出目录格式：
 
 ```text
 src/vehicle_simulator/log/path_optimization_report_<time>/
 ```
 
-Generated files:
+输出内容：
 
 ```text
 report.html
@@ -482,31 +406,79 @@ summary.png
 segment_*.png
 ```
 
-Interpretation:
+建议直接打开：
 
-- `actual_to_shortest_percent = L_actual / L_shortest * 100`
-- pass condition: `actual_to_shortest_percent < 120`
-- equivalently: `shortest_to_actual_percent > 83.33`
-
-The HTML report shows:
-
-- summary statistics across all path segments
-- pass/fail status for each waypoint segment
-- bar charts for final ratios
-- per-segment time-history plots of actual path length, shortest path length,
-  and path optimization
-
-## Troubleshooting
-
-### RViz Has No OverallMap
-
-Check whether the preview point cloud exists:
-
-```bash
-ls src/vehicle_simulator/mesh/<world_name>/preview/pointcloud.ply
+```text
+report.html
 ```
 
-For LRAE scenes, regenerate maps:
+它会用图形方式展示：
+
+- 每段路径最终是否满足 `< 120%`
+- 每段路径的 `L_actual` 与 `L_shortest`
+- 每段路径的优化度曲线
+- 总体通过率统计
+
+### 7.7 指标怎么理解
+
+本仓库使用两组等价指标：
+
+```text
+actual_to_shortest_percent = L_actual / L_shortest * 100
+shortest_to_actual_percent = L_shortest / L_actual * 100
+```
+
+判定通过：
+
+```text
+actual_to_shortest_percent < 120
+```
+
+等价于：
+
+```text
+shortest_to_actual_percent > 83.33
+```
+
+## 8. 日志文件说明
+
+日志目录：
+
+```text
+src/vehicle_simulator/log
+```
+
+常见文件：
+
+```text
+metrics_<time>.txt
+trajectory_<time>.txt
+path_metrics_<time>.txt
+```
+
+`metrics_<time>.txt` 含义：
+
+```text
+explored_volume traveling_distance runtime time_duration
+```
+
+`trajectory_<time>.txt` 含义：
+
+```text
+x y z roll pitch yaw time_duration
+```
+
+`path_metrics_<time>.txt` 含义：
+
+```text
+time_duration start_x start_y start_z goal_x goal_y goal_z
+actual_path_length shortest_path_length
+actual_to_shortest_percent shortest_to_actual_percent
+```
+
+## 9. LRAE preview 点云重新生成
+
+如果修改了 LRAE world，可重新生成 preview 点云：
 
 ```bash
 python3 src/vehicle_simulator/scripts/generate_lrae_preview_maps.py
@@ -514,49 +486,87 @@ colcon build --packages-select vehicle_simulator
 source install/setup.bash
 ```
 
-### RViz Has No ShortestPath
+## 10. 常见问题
 
-`ShortestPath` appears only after clicking a target with the RViz `Waypoint`
-tool. It also requires:
+### 10.1 RViz 中没有 OverallMap
 
-- `/overall_map` can be loaded
-- start and goal are inside the preview map
-- start and goal are in the same traversable connected region
-
-If no path is found, try a closer waypoint or adjust obstacle/grid parameters
-in `visualization_tools.launch`.
-
-### Gazebo Starts But Vehicle Pose Looks Wrong
-
-Check `terrainZ` and `vehicleHeight`:
+先检查对应场景的 preview 点云是否存在：
 
 ```bash
-ros2 launch vehicle_simulator system_lrae_scene_1.launch terrainZ:=0.3
+ls src/vehicle_simulator/mesh/<world_name>/preview/pointcloud.ply
 ```
 
-The model spawn height is:
+如果是 LRAE 场景，可以重新生成：
 
-```text
-terrainZ + vehicleHeight
+```bash
+python3 src/vehicle_simulator/scripts/generate_lrae_preview_maps.py
+colcon build --packages-select vehicle_simulator
+source install/setup.bash
 ```
 
-### Multiple Simulations On One Machine
+### 10.2 RViz 中没有 ShortestPath
 
-Use a separate ROS domain ID. Keep it no higher than 232 because DDS port
-mapping can fail above that range:
+出现条件：
+
+- 已在 RViz 中点击 `Waypoint`
+- preview 点云可成功加载
+- 起点和终点都在地图范围内
+- 起点和终点位于同一个可达区域
+
+如果没有路径，可尝试：
+
+- 换一个更近的目标点
+- 调整 `visualization_tools.launch` 里的 A* 栅格参数
+- 检查 preview 点云是否覆盖该区域
+
+### 10.3 为什么日志里一个文件会有多段路径
+
+因为一次运行过程中你可能点击了多个目标点。
+
+当前实现中：
+
+- 一个 `path_metrics_<time>.txt` 对应一次 `visualizationTools` 进程生命周期
+- 一个文件里可以包含多段 waypoint 任务
+- 离线分析脚本会自动把这些段拆分出来并分别统计
+
+### 10.4 多个仿真实例同时运行怎么办
+
+建议设置不同的 `ROS_DOMAIN_ID`：
 
 ```bash
 export ROS_DOMAIN_ID=120
 ```
 
-## Original Project
+尽量不要使用大于 `232` 的 ID，否则 DDS 端口映射可能出现问题。
 
-The original project page is:
+## 11. 算法原理文档
+
+本仓库额外提供了一份中文原理文档，详细说明：
+
+- 车辆如何从目标点导航到终点
+- 实际导航路径和 A* 最短路径的区别
+- 各节点之间的话题流
+- 对应代码文件和关键函数
+- A* 的建图、障碍膨胀、搜索和简化过程
+
+文档路径：
+
+```text
+docs/navigation_and_path_optimization_zh.md
+```
+
+## 12. 原始项目
+
+原始项目主页：
 
 ```text
 https://www.cmu-exploration.com
 ```
 
-This enhanced repository keeps the original autonomous exploration pipeline and
-adds the LRAE scenes, Gazebo realism improvements, obstacle-aware shortest-path
-visualization, and path-planning optimality metric support described above.
+当前增强版仓库在保留原始自主探索链路的基础上，增加了：
+
+- LRAE 场景适配
+- Gazebo 环境增强
+- RViz 最短路径显示
+- 路径优化度日志
+- 路径优化度离线可视化报告
