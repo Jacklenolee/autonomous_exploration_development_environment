@@ -50,14 +50,23 @@ double exploredAreaVoxelSize = 0.3;
 double exploredVolumeVoxelSize = 0.5;
 double transInterval = 0.2;
 double yawInterval = 10.0;
-double shortestPathGridResolution = 0.25;
-double shortestPathObstacleInflation = 0.6;
+double shortestPathGridResolution = 0.2;
+double shortestPathObstacleInflation = 0.75;
 double shortestPathObstacleMinZ = 0.2;
 double shortestPathObstacleMaxZ = 2.0;
 double shortestPathGroundMinZ = -0.3;
 double shortestPathGroundMaxZ = 0.3;
 double shortestPathGroundInflation = 0.3;
+double shortestPathGroundSearchRadius = 0.6;
 double shortestPathNearestFreeRadius = 3.0;
+double shortestPathLineCheckResolution = 0.05;
+double shortestPathLineCheckRadius = 0.15;
+bool shortestPathUseDynamicObstacles = true;
+double shortestPathDynamicObstacleMinZ = 0.2;
+double shortestPathDynamicObstacleMaxZ = 2.0;
+double shortestPathDynamicObstacleInflation = 0.75;
+double shortestPathDynamicObstacleRange = 12.0;
+double shortestPathReplanInterval = 1.0;
 int overallMapDisplayInterval = 2;
 int overallMapDisplayCount = 0;
 int exploredAreaDisplayInterval = 1;
@@ -92,8 +101,14 @@ int shortestPathGridWidth = 0, shortestPathGridHeight = 0;
 float shortestPathGridMinX = 0, shortestPathGridMinY = 0;
 float shortestPathFloorZ = 0;
 vector<unsigned char> shortestPathGrid;
+vector<unsigned char> shortestPathStaticGrid;
+vector<unsigned char> shortestPathDynamicObstacleGrid;
 vector<geometry_msgs::msg::Point> shortestPathPoints;
 vector<geometry_msgs::msg::PoseStamped> shortestPathHistory;
+size_t shortestPathCurrentHistoryStart = 0;
+bool shortestPathCurrentHistoryActive = false;
+bool shortestPathDynamicGridDirty = false;
+double shortestPathLastReplanTime = 0;
 
 pcl::VoxelGrid<pcl::PointXYZ> overallMapDwzFilter;
 pcl::VoxelGrid<pcl::PointXYZI> exploredAreaDwzFilter;
@@ -162,6 +177,43 @@ bool isFreeCell(int ix, int iy)
   return isInsideGrid(ix, iy) && shortestPathGrid[gridIndex(ix, iy)] == 0;
 }
 
+void setInflatedGridCells(vector<unsigned char>& grid, int cx, int cy, int radiusCells, unsigned char value)
+{
+  int radiusCells2 = radiusCells * radiusCells;
+  for (int dy = -radiusCells; dy <= radiusCells; dy++) {
+    for (int dx = -radiusCells; dx <= radiusCells; dx++) {
+      if (dx * dx + dy * dy > radiusCells2) {
+        continue;
+      }
+
+      int nx = cx + dx;
+      int ny = cy + dy;
+      if (isInsideGrid(nx, ny)) {
+        grid[gridIndex(nx, ny)] = value;
+      }
+    }
+  }
+}
+
+void updateCombinedShortestPathGrid()
+{
+  if (shortestPathStaticGrid.empty()) {
+    shortestPathGrid.clear();
+    return;
+  }
+
+  shortestPathGrid = shortestPathStaticGrid;
+  if (!shortestPathUseDynamicObstacles || shortestPathDynamicObstacleGrid.empty()) {
+    return;
+  }
+
+  for (size_t i = 0; i < shortestPathGrid.size(); i++) {
+    if (shortestPathDynamicObstacleGrid[i] != 0) {
+      shortestPathGrid[i] = 1;
+    }
+  }
+}
+
 bool findNearestFreeCell(int& ix, int& iy)
 {
   if (isFreeCell(ix, iy)) {
@@ -205,39 +257,67 @@ bool findNearestFreeCell(int& ix, int& iy)
   return false;
 }
 
-bool hasLineOfSight(int x0, int y0, int x1, int y1)
+bool isWorldCircleFree(float x, float y, float radius)
 {
-  int dx = abs(x1 - x0);
-  int sx = x0 < x1 ? 1 : -1;
-  int dy = -abs(y1 - y0);
-  int sy = y0 < y1 ? 1 : -1;
-  int error = dx + dy;
+  int ix, iy;
+  if (!worldToGrid(x, y, ix, iy)) {
+    return false;
+  }
 
-  while (true) {
-    if (!isFreeCell(x0, y0)) {
-      return false;
-    }
+  int radiusCells = max(0, static_cast<int>(ceil(radius / shortestPathGridResolution)));
+  int radiusCells2 = radiusCells * radiusCells;
+  for (int dy = -radiusCells; dy <= radiusCells; dy++) {
+    for (int dx = -radiusCells; dx <= radiusCells; dx++) {
+      if (dx * dx + dy * dy > radiusCells2) {
+        continue;
+      }
 
-    if (x0 == x1 && y0 == y1) {
-      return true;
-    }
-
-    int error2 = 2 * error;
-    if (error2 >= dy) {
-      error += dy;
-      x0 += sx;
-    }
-    if (error2 <= dx) {
-      error += dx;
-      y0 += sy;
+      if (!isFreeCell(ix + dx, iy + dy)) {
+        return false;
+      }
     }
   }
+
+  return true;
+}
+
+bool hasWorldLineOfSight(float x0, float y0, float x1, float y1, float radius)
+{
+  float dx = x1 - x0;
+  float dy = y1 - y0;
+  float length = sqrt(dx * dx + dy * dy);
+  int sampleNum = max(1, static_cast<int>(ceil(length / shortestPathLineCheckResolution)));
+
+  for (int i = 0; i <= sampleNum; i++) {
+    float ratio = static_cast<float>(i) / static_cast<float>(sampleNum);
+    float x = x0 + ratio * dx;
+    float y = y0 + ratio * dy;
+    if (!isWorldCircleFree(x, y, radius)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool hasLineOfSight(int x0, int y0, int x1, int y1)
+{
+  geometry_msgs::msg::Point start = gridToWorld(x0, y0, shortestPathFloorZ);
+  geometry_msgs::msg::Point goal = gridToWorld(x1, y1, shortestPathFloorZ);
+  return hasWorldLineOfSight(start.x, start.y, goal.x, goal.y, shortestPathLineCheckRadius);
 }
 
 void appendShortestPathToHistory()
 {
   if (shortestPathPoints.size() < 2) {
     return;
+  }
+
+  if (!shortestPathCurrentHistoryActive) {
+    shortestPathCurrentHistoryStart = shortestPathHistory.size();
+    shortestPathCurrentHistoryActive = true;
+  } else if (shortestPathCurrentHistoryStart < shortestPathHistory.size()) {
+    shortestPathHistory.resize(shortestPathCurrentHistoryStart);
   }
 
   for (size_t i = 0; i < shortestPathPoints.size(); i++) {
@@ -302,6 +382,8 @@ void buildShortestPathGrid()
   vector<unsigned char> rawGroundGrid(shortestPathGridWidth * shortestPathGridHeight, 0);
   vector<float> cellMinZ(shortestPathGridWidth * shortestPathGridHeight,
                          std::numeric_limits<float>::infinity());
+  vector<float> localGroundZ(shortestPathGridWidth * shortestPathGridHeight,
+                             std::numeric_limits<float>::infinity());
 
   for (const auto& point : overallMapCloud->points) {
     int ix, iy;
@@ -313,6 +395,30 @@ void buildShortestPathGrid()
     cellMinZ[index] = min(cellMinZ[index], point.z);
   }
 
+  int groundSearchCells = max(0, static_cast<int>(ceil(shortestPathGroundSearchRadius / shortestPathGridResolution)));
+  for (int y = 0; y < shortestPathGridHeight; y++) {
+    for (int x = 0; x < shortestPathGridWidth; x++) {
+      float minLocalZ = std::numeric_limits<float>::infinity();
+      for (int dy = -groundSearchCells; dy <= groundSearchCells; dy++) {
+        for (int dx = -groundSearchCells; dx <= groundSearchCells; dx++) {
+          if (dx * dx + dy * dy > groundSearchCells * groundSearchCells) {
+            continue;
+          }
+
+          int nx = x + dx;
+          int ny = y + dy;
+          if (!isInsideGrid(nx, ny)) {
+            continue;
+          }
+
+          minLocalZ = min(minLocalZ, cellMinZ[gridIndex(nx, ny)]);
+        }
+      }
+
+      localGroundZ[gridIndex(x, y)] = minLocalZ;
+    }
+  }
+
   for (const auto& point : overallMapCloud->points) {
     int ix, iy;
     if (!worldToGrid(point.x, point.y, ix, iy)) {
@@ -320,70 +426,47 @@ void buildShortestPathGrid()
     }
 
     int index = gridIndex(ix, iy);
-    if (!std::isfinite(cellMinZ[index])) {
+    if (!std::isfinite(localGroundZ[index])) {
       continue;
     }
 
-    float localGroundZ = cellMinZ[index];
-    if (point.z >= localGroundZ + shortestPathGroundMinZ &&
-        point.z <= localGroundZ + shortestPathGroundMaxZ) {
+    float groundZ = localGroundZ[index];
+    if (point.z >= groundZ + shortestPathGroundMinZ &&
+        point.z <= groundZ + shortestPathGroundMaxZ) {
       rawGroundGrid[index] = 1;
     }
 
-    if (point.z >= localGroundZ + shortestPathObstacleMinZ &&
-        point.z <= localGroundZ + shortestPathObstacleMaxZ) {
+    if (point.z >= groundZ + shortestPathObstacleMinZ &&
+        point.z <= groundZ + shortestPathObstacleMaxZ) {
       rawObstacleGrid[index] = 1;
     }
   }
 
   int groundInflationCells = max(0, static_cast<int>(ceil(shortestPathGroundInflation / shortestPathGridResolution)));
-  int groundInflationCells2 = groundInflationCells * groundInflationCells;
   for (int y = 0; y < shortestPathGridHeight; y++) {
     for (int x = 0; x < shortestPathGridWidth; x++) {
       if (rawGroundGrid[gridIndex(x, y)] == 0) {
         continue;
       }
 
-      for (int dy = -groundInflationCells; dy <= groundInflationCells; dy++) {
-        for (int dx = -groundInflationCells; dx <= groundInflationCells; dx++) {
-          if (dx * dx + dy * dy > groundInflationCells2) {
-            continue;
-          }
-
-          int nx = x + dx;
-          int ny = y + dy;
-          if (isInsideGrid(nx, ny)) {
-            shortestPathGrid[gridIndex(nx, ny)] = 0;
-          }
-        }
-      }
+      setInflatedGridCells(shortestPathGrid, x, y, groundInflationCells, 0);
     }
   }
 
   int inflationCells = max(0, static_cast<int>(ceil(shortestPathObstacleInflation / shortestPathGridResolution)));
-  int inflationCells2 = inflationCells * inflationCells;
   for (int y = 0; y < shortestPathGridHeight; y++) {
     for (int x = 0; x < shortestPathGridWidth; x++) {
       if (rawObstacleGrid[gridIndex(x, y)] == 0) {
         continue;
       }
 
-      for (int dy = -inflationCells; dy <= inflationCells; dy++) {
-        for (int dx = -inflationCells; dx <= inflationCells; dx++) {
-          if (dx * dx + dy * dy > inflationCells2) {
-            continue;
-          }
-
-          int nx = x + dx;
-          int ny = y + dy;
-          if (isInsideGrid(nx, ny)) {
-            shortestPathGrid[gridIndex(nx, ny)] = 1;
-          }
-        }
-      }
+      setInflatedGridCells(shortestPathGrid, x, y, inflationCells, 1);
     }
   }
 
+  shortestPathStaticGrid = shortestPathGrid;
+  shortestPathDynamicObstacleGrid.assign(shortestPathGridWidth * shortestPathGridHeight, 0);
+  updateCombinedShortestPathGrid();
   shortestPathGridReady = true;
 }
 
@@ -408,12 +491,16 @@ bool computeObstacleAwareShortestPath()
     return false;
   }
 
-  int startX, startY, goalX, goalY;
-  if (!worldToGrid(pathStartX, pathStartY, startX, startY) ||
-      !worldToGrid(pathGoalX, pathGoalY, goalX, goalY)) {
+  int originalStartX, originalStartY, originalGoalX, originalGoalY;
+  if (!worldToGrid(pathStartX, pathStartY, originalStartX, originalStartY) ||
+      !worldToGrid(pathGoalX, pathGoalY, originalGoalX, originalGoalY)) {
     return false;
   }
 
+  int startX = originalStartX;
+  int startY = originalStartY;
+  int goalX = originalGoalX;
+  int goalY = originalGoalY;
   if (!findNearestFreeCell(startX, startY) || !findNearestFreeCell(goalX, goalY)) {
     return false;
   }
@@ -539,12 +626,21 @@ bool computeObstacleAwareShortestPath()
   }
 
   if (!shortestPathPoints.empty()) {
-    shortestPathPoints.front().x = pathStartX;
-    shortestPathPoints.front().y = pathStartY;
-    shortestPathPoints.front().z = pathStartZ;
-    shortestPathPoints.back().x = pathGoalX;
-    shortestPathPoints.back().y = pathGoalY;
-    shortestPathPoints.back().z = pathGoalZ;
+    if (isFreeCell(originalStartX, originalStartY) &&
+        hasWorldLineOfSight(pathStartX, pathStartY, shortestPathPoints.front().x, shortestPathPoints.front().y,
+                            shortestPathLineCheckRadius)) {
+      shortestPathPoints.front().x = pathStartX;
+      shortestPathPoints.front().y = pathStartY;
+      shortestPathPoints.front().z = pathStartZ;
+    }
+
+    if (isFreeCell(originalGoalX, originalGoalY) &&
+        hasWorldLineOfSight(shortestPathPoints.back().x, shortestPathPoints.back().y, pathGoalX, pathGoalY,
+                            shortestPathLineCheckRadius)) {
+      shortestPathPoints.back().x = pathGoalX;
+      shortestPathPoints.back().y = pathGoalY;
+      shortestPathPoints.back().z = pathGoalZ;
+    }
   }
 
   shortestPathDis = computePolylineLength(shortestPathPoints);
@@ -588,6 +684,28 @@ void updatePathOptimization()
   pathOptimization = 100.0 * shortestPathDis / pathActualDis;
 }
 
+bool replanShortestPath(const char* reason)
+{
+  if (!shortestPathGridReady || !shortestPathInited) {
+    return false;
+  }
+
+  vector<geometry_msgs::msg::Point> previousShortestPathPoints = shortestPathPoints;
+  float previousShortestPathDis = shortestPathDis;
+  bool replanned = computeObstacleAwareShortestPath();
+  if (!replanned) {
+    shortestPathPoints = previousShortestPathPoints;
+    shortestPathDis = previousShortestPathDis;
+    RCLCPP_WARN(rclcpp::get_logger("visualizationTools"),
+                "Failed to replan obstacle-aware shortest path after %s. Keeping previous path.", reason);
+    return false;
+  }
+
+  appendShortestPathToHistory();
+  updatePathOptimization();
+  return true;
+}
+
 void publishPathMetrics()
 {
   if (!shortestPathInited) {
@@ -603,6 +721,38 @@ void publishPathMetrics()
   pubActualToShortestRatioPtr->publish(actualToShortestRatioMsg);
 }
 
+bool isShortestPathCollisionFree()
+{
+  if (!shortestPathInited || shortestPathPoints.size() < 2) {
+    return true;
+  }
+
+  for (size_t i = 1; i < shortestPathPoints.size(); i++) {
+    if (!hasWorldLineOfSight(shortestPathPoints[i - 1].x, shortestPathPoints[i - 1].y,
+                             shortestPathPoints[i].x, shortestPathPoints[i].y,
+                             shortestPathLineCheckRadius)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void replanIfDynamicObstaclesBlockShortestPath()
+{
+  if (!shortestPathInited || !shortestPathDynamicGridDirty ||
+      systemTime - shortestPathLastReplanTime < shortestPathReplanInterval) {
+    return;
+  }
+
+  if (!isShortestPathCollisionFree() &&
+      replanShortestPath("dynamic obstacle update")) {
+    shortestPathLastReplanTime = systemTime;
+  }
+
+  shortestPathDynamicGridDirty = false;
+}
+
 void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr waypoint)
 {
   pathStartX = vehicleX;
@@ -612,6 +762,8 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
   pathGoalY = waypoint->point.y;
   pathGoalZ = waypoint->point.z;
   pathActualDis = 0;
+  shortestPathCurrentHistoryStart = shortestPathHistory.size();
+  shortestPathCurrentHistoryActive = false;
   vector<geometry_msgs::msg::Point> previousShortestPathPoints = shortestPathPoints;
   float previousShortestPathDis = shortestPathDis;
   bool previousShortestPathInited = shortestPathInited;
@@ -623,8 +775,10 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
     shortestPathPoints = previousShortestPathPoints;
     shortestPathDis = previousShortestPathDis;
     shortestPathInited = previousShortestPathInited;
+    shortestPathCurrentHistoryActive = previousShortestPathInited;
   } else {
     appendShortestPathToHistory();
+    shortestPathLastReplanTime = systemTime;
   }
 
   updatePathOptimization();
@@ -662,6 +816,8 @@ void odometryHandler(const nav_msgs::msg::Odometry::ConstSharedPtr odom)
     timeDurationMsg.data = timeDuration;
     pubTimeDurationPtr->publish(timeDurationMsg);
   }
+
+  replanIfDynamicObstaclesBlockShortestPath();
 
   if (dis < transInterval && dYaw < yawInterval) {
     return;
@@ -724,6 +880,33 @@ void laserCloudHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr laser
 
   laserCloud->clear();
   pcl::fromROSMsg(*laserCloudIn, *laserCloud);
+
+  if (shortestPathUseDynamicObstacles && shortestPathGridReady &&
+      !shortestPathStaticGrid.empty() && !laserCloud->points.empty()) {
+    shortestPathDynamicObstacleGrid.assign(shortestPathGridWidth * shortestPathGridHeight, 0);
+    int dynamicInflationCells = max(0, static_cast<int>(ceil(shortestPathDynamicObstacleInflation /
+                                                            shortestPathGridResolution)));
+
+    for (const auto& point : laserCloud->points) {
+      float relX = point.x - vehicleX;
+      float relY = point.y - vehicleY;
+      float relZ = point.z - vehicleZ;
+      float disXY = sqrt(relX * relX + relY * relY);
+      if (disXY > shortestPathDynamicObstacleRange ||
+          relZ < shortestPathDynamicObstacleMinZ ||
+          relZ > shortestPathDynamicObstacleMaxZ) {
+        continue;
+      }
+
+      int ix, iy;
+      if (worldToGrid(point.x, point.y, ix, iy)) {
+        setInflatedGridCells(shortestPathDynamicObstacleGrid, ix, iy, dynamicInflationCells, 1);
+      }
+    }
+
+    updateCombinedShortestPathGrid();
+    shortestPathDynamicGridDirty = true;
+  }
 
   *exploredVolumeCloud += *laserCloud;
 
@@ -796,7 +979,16 @@ int main(int argc, char** argv)
   nh->declare_parameter<double>("shortestPathGroundMinZ", shortestPathGroundMinZ);
   nh->declare_parameter<double>("shortestPathGroundMaxZ", shortestPathGroundMaxZ);
   nh->declare_parameter<double>("shortestPathGroundInflation", shortestPathGroundInflation);
+  nh->declare_parameter<double>("shortestPathGroundSearchRadius", shortestPathGroundSearchRadius);
   nh->declare_parameter<double>("shortestPathNearestFreeRadius", shortestPathNearestFreeRadius);
+  nh->declare_parameter<double>("shortestPathLineCheckResolution", shortestPathLineCheckResolution);
+  nh->declare_parameter<double>("shortestPathLineCheckRadius", shortestPathLineCheckRadius);
+  nh->declare_parameter<bool>("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
+  nh->declare_parameter<double>("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
+  nh->declare_parameter<double>("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);
+  nh->declare_parameter<double>("shortestPathDynamicObstacleInflation", shortestPathDynamicObstacleInflation);
+  nh->declare_parameter<double>("shortestPathDynamicObstacleRange", shortestPathDynamicObstacleRange);
+  nh->declare_parameter<double>("shortestPathReplanInterval", shortestPathReplanInterval);
   nh->declare_parameter<int>("overallMapDisplayInterval", overallMapDisplayInterval);
   nh->declare_parameter<int>("exploredAreaDisplayInterval", exploredAreaDisplayInterval);
 
@@ -816,7 +1008,16 @@ int main(int argc, char** argv)
   nh->get_parameter("shortestPathGroundMinZ", shortestPathGroundMinZ);
   nh->get_parameter("shortestPathGroundMaxZ", shortestPathGroundMaxZ);
   nh->get_parameter("shortestPathGroundInflation", shortestPathGroundInflation);
+  nh->get_parameter("shortestPathGroundSearchRadius", shortestPathGroundSearchRadius);
   nh->get_parameter("shortestPathNearestFreeRadius", shortestPathNearestFreeRadius);
+  nh->get_parameter("shortestPathLineCheckResolution", shortestPathLineCheckResolution);
+  nh->get_parameter("shortestPathLineCheckRadius", shortestPathLineCheckRadius);
+  nh->get_parameter("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
+  nh->get_parameter("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
+  nh->get_parameter("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);
+  nh->get_parameter("shortestPathDynamicObstacleInflation", shortestPathDynamicObstacleInflation);
+  nh->get_parameter("shortestPathDynamicObstacleRange", shortestPathDynamicObstacleRange);
+  nh->get_parameter("shortestPathReplanInterval", shortestPathReplanInterval);
   nh->get_parameter("overallMapDisplayInterval", overallMapDisplayInterval);
   nh->get_parameter("exploredAreaDisplayInterval", exploredAreaDisplayInterval);
 

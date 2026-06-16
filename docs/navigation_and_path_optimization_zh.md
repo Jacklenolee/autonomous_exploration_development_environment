@@ -75,7 +75,7 @@
 对应代码：
 
 - [localPlanner.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:593)
-- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:791)
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:1035)
 
 ### 3.2 点云与地形输入
 
@@ -670,7 +670,7 @@ A* 在本仓库中的作用不是直接开车，而是做“理论参考路径�
 
 ### 6.2 A* 使用什么地图
 
-A* 不直接用实时雷达点云，而是用场景的 preview 地图：
+A* 的基础地图来自场景的 preview 点云：
 
 - `mesh/<world_name>/preview/pointcloud.ply`
 
@@ -678,10 +678,16 @@ A* 不直接用实时雷达点云，而是用场景的 preview 地图：
 
 - [visualization_tools.launch](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/launch/visualization_tools.launch:7)
 
-这样做的优点：
+同时，当前版本会把 `/registered_scan` 中的实时障碍叠加到最短路径占据栅格上：
+
+- 动态障碍更新：[laserCloudHandler()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:873)
+- 静态/动态栅格合并：[updateCombinedShortestPathGrid()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:198)
+
+这样做的意义：
 
 - 起点和终点间的全局信息更完整
-- 不依赖局部实时扫描的瞬时覆盖范围
+- preview 地图提供全局可达区域
+- 实时扫描补充 preview 地图中漏掉、过稀疏或运行时才出现的障碍物
 - 适合做“理论最短路径”评估
 
 ### 6.3 A* 之前如何建图
@@ -698,25 +704,36 @@ A* 不直接用实时雷达点云，而是用场景的 preview 地图：
 
 然后根据 `shortestPathGridResolution` 构建二维栅格。
 
+当前默认：
+
+```text
+shortestPathGridResolution = 0.2m
+```
+
 代码：
 
-- [buildShortestPathGrid()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:236)
+- [buildShortestPathGrid()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:346)
 
-#### 6.3.2 计算每个栅格的局部地面高度
+#### 6.3.2 计算局部地面高度
 
-对于每个格子，先记录该格子中的最低点 `cellMinZ`：
+系统先记录每个格子的最低点 `cellMinZ`：
 
-- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:274)
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:388)
+
+然后在 `shortestPathGroundSearchRadius` 邻域内搜索局部最低地面高度：
+
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:398)
 
 这样设计的意义是：
 
 - 不直接用全局统一高度判断障碍物
-- 而是按“每个局部格子的地面”来判断
+- 也不只用“当前格子自己的最低点”判断
 - 对起伏地形更稳健
+- 对薄墙、木板、立柱这类格子内缺少地面点的障碍更稳健
 
 #### 6.3.3 区分地面和障碍物
 
-对每个点，根据它相对 `cellMinZ` 的高度分两类：
+对每个点，根据它相对邻域局部地面 `localGroundZ` 的高度分两类：
 
 1. 可通行地面：
    `point.z` 落在
@@ -727,8 +744,8 @@ A* 不直接用实时雷达点云，而是用场景的 preview 地图：
 
 代码：
 
-- 地面判断：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:296)
-- 障碍物判断：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:301)
+- 地面判断：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:433)
+- 障碍物判断：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:439)
 
 默认参数来自：
 
@@ -750,7 +767,7 @@ A* 不直接用实时雷达点云，而是用场景的 preview 地图：
 
 为了让地面栅格更连通，系统会对地面做一次膨胀：
 
-- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:307)
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:445)
 
 作用：
 
@@ -760,22 +777,44 @@ A* 不直接用实时雷达点云，而是用场景的 preview 地图：
 
 系统还会对障碍物做膨胀：
 
-- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:331)
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:457)
 
 默认障碍膨胀半径：
 
-- `shortestPathObstacleInflation = 0.6`
+- `shortestPathObstacleInflation = 0.75`
 
 作用：
 
 - 给障碍物增加安全边界
 - 防止最短路径贴着墙或树边走
 
+#### 6.3.6 动态障碍叠加
+
+静态 preview 地图只能代表启动时加载的全局参考地图。如果 preview 点云过稀疏，或者 RViz 中能看到的实时扫描障碍没有被 preview 正确表达，最短路径就可能看起来穿过障碍物。
+
+当前版本增加了动态障碍层：
+
+1. 订阅 `/registered_scan`
+2. 过滤车辆附近、相对车辆高度在 `[0.2m, 2.0m]` 的点
+3. 将这些点投影到最短路径栅格
+4. 按 `shortestPathDynamicObstacleInflation = 0.75m` 膨胀
+5. 与静态栅格合并为最终 A* 占据栅格
+
+关键代码：
+
+- 动态障碍提取：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:873)
+- 动态障碍膨胀：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:895)
+- 栅格合并：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:198)
+
+如果动态障碍挡住了当前 `/shortest_path`，系统会按 `shortestPathReplanInterval` 节流自动重算：
+
+- [replanIfDynamicObstaclesBlockShortestPath()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:742)
+
 ### 6.4 A* 搜索过程
 
 真正的 A* 在：
 
-- [computeObstacleAwareShortestPath()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:370)
+- [computeObstacleAwareShortestPath()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:486)
 
 #### 6.4.1 起点终点处理
 
@@ -785,12 +824,18 @@ A* 不直接用实时雷达点云，而是用场景的 preview 地图：
 
 如果起点或终点落在障碍物上，不会直接失败，而是会在一定半径内搜索最近的自由格：
 
-- [findNearestFreeCell()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:162)
+- [findNearestFreeCell()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:217)
 
 这是一个很实用的鲁棒性处理，避免：
 
 - RViz 点击时刚好点到障碍边缘
 - 起点正好落在一个膨胀障碍格内
+
+同时当前版本不再无条件把路径首尾点拉回原始点击坐标。只有当“原始坐标到最近自由格”的连接线也通过安全检查时，才恢复原始坐标：
+
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:629)
+
+这避免了目标点点在障碍边缘时，最后一段红线被强行拉进障碍物。
 
 #### 6.4.2 八邻域搜索
 
@@ -801,7 +846,7 @@ A* 使用八邻域扩展：
 
 代码：
 
-- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:418)
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:555)
 
 代价：
 
@@ -812,7 +857,7 @@ A* 使用八邻域扩展：
 
 如果尝试走对角线，但横向或纵向相邻格被障碍占据，则这条对角扩展会被禁止：
 
-- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:441)
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:562)
 
 这样做的作用：
 
@@ -823,7 +868,7 @@ A* 使用八邻域扩展：
 
 启发函数使用当前格到目标格的欧氏距离：
 
-- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:404)
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:524)
 
 因此这里是标准的基于欧氏启发的 A*。
 
@@ -832,28 +877,38 @@ A* 使用八邻域扩展：
 A* 得到的是一条栅格路径，通常锯齿较多。系统做了两步后处理：
 
 1. 从终点回溯 `cameFrom`
-2. 用 line-of-sight 检查做折线简化
+2. 用带安全半径的 line-of-sight 检查做折线简化
 
 对应代码：
 
-- 回溯：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:468)
-- 简化：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:485)
+- 回溯：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:588)
+- 简化：[visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:602)
 
 line-of-sight 检查函数：
 
-- [hasLineOfSight()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:193)
+- [hasLineOfSight()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:303)
+
+原先如果只按栅格 Bresenham 直线检查，折线简化有可能把 A* 栅格路径拉成一条穿过障碍边缘的长直线。当前版本改为：
+
+```text
+shortestPathLineCheckResolution = 0.05m
+shortestPathLineCheckRadius = 0.15m
+```
+
+也就是沿候选直线每 5cm 采样一次，并检查采样点周围 15cm 半径内是否全是自由格。
 
 这个步骤的效果是：
 
 - 去掉不必要的折点
 - 使 `/shortest_path` 更平滑
 - 让 `L_shortest` 更接近连续空间中的可达最短折线
+- 避免为了过度平滑而穿过障碍物
 
 ### 6.6 发布最短路径
 
 最终结果以 `nav_msgs/msg/Path` 发布：
 
-- [publishShortestPath()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:522)
+- [publishShortestPath()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:651)
 
 话题：
 
@@ -872,17 +927,17 @@ line-of-sight 检查函数：
 
 对应代码：
 
-- [waypointHandler()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:569)
+- [waypointHandler()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:756)
 
 ### 7.2 计算最短路径长度
 
 在 `waypointHandler()` 中会调用：
 
-- [computeObstacleAwareShortestPath()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:370)
+- [computeObstacleAwareShortestPath()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:486)
 
 然后调用：
 
-- [computePolylineLength()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:358)
+- [computePolylineLength()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:474)
 
 得到：
 
@@ -900,7 +955,7 @@ pathActualDis += dis
 
 对应代码：
 
-- [odometryHandler()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:634)
+- [odometryHandler()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:789)
 
 即：
 
@@ -912,7 +967,7 @@ pathActualDis = L_actual
 
 更新公式在：
 
-- [updatePathOptimization()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:542)
+- [updatePathOptimization()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:675)
 
 即：
 
@@ -931,7 +986,7 @@ path_metrics_<time>.txt
 
 对应代码：
 
-- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:662)
+- [visualizationTools.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:847)
 
 因此一个日志文件里会记录：
 
