@@ -102,19 +102,24 @@ lrae_scene_4.world
 - `/trajectory`：实际行驶轨迹
 - `/overall_map`：全局 preview 点云
 
-当前版本新增：
+当前版本新增两个最短路径相关可视化：
 
 ```text
 /shortest_path
+/shortest_path_history
 ```
 
 RViz 中显示名称为：
 
 ```text
+CurrentShortestPath
 ShortestPath
 ```
 
-它不是简单直线，而是基于 preview 点云构建的 2D 占据栅格，在考虑障碍物后用 A* 算法求出的可达最短路径。
+- `CurrentShortestPath` 订阅 `/shortest_path`，显示当前 waypoint 对应的 A* 障碍物约束最短路径。
+- `ShortestPath` 订阅 `/shortest_path_history`，显示已经规划过的最短路径历史线段。
+
+这两条都不是简单直线。它们基于 preview 点云构建 2D 占据栅格，在考虑障碍物膨胀、地面可通行区域和动态障碍后，用 A* 算法求出可达最短路径。历史显示使用 `MarkerArray/LINE_LIST`，每一小段独立绘制，避免 RViz 把不同规划片段自动连接成穿过障碍物的假直线。
 
 ### 1.4 新增路径优化度日志
 
@@ -317,7 +322,8 @@ ros2 launch vehicle_simulator system_lrae_scene_1.launch \
 | `TerrainMap` | `/terrain_map` | 局部地形分析结果 |
 | `TerrainMapExt` | `/terrain_map_ext` | 扩展地形图 |
 | `Path` | `/path` | 实际局部规划器输出路径 |
-| `ShortestPath` | `/shortest_path` | A* 障碍物约束最短路径 |
+| `CurrentShortestPath` | `/shortest_path` | 当前 waypoint 的 A* 障碍物约束最短路径 |
+| `ShortestPath` | `/shortest_path_history` | A* 最短路径历史线段 |
 | `Trajectory` | `/trajectory` | 车辆实际行驶轨迹 |
 | `FreePaths` | `/free_paths` | 当前可行候选路径集合 |
 | `Waypoint` | `/way_point` | 目标点工具 |
@@ -332,14 +338,16 @@ ros2 launch vehicle_simulator system_lrae_scene_1.launch \
 4. 在地图中点击目标点。
 5. 系统会发布 `/way_point`。
 6. 实际导航路径会显示在 `/path`。
-7. A* 最短路径会显示在 `/shortest_path`。
-8. 实际车辆轨迹会显示在 `/trajectory`。
-9. 路径优化度日志会写入 `path_metrics_<time>.txt`。
+7. 当前 A* 最短路径会显示在 `CurrentShortestPath`。
+8. 已规划过的 A* 最短路径历史会累计显示在 `ShortestPath`。
+9. 实际车辆轨迹会显示在 `/trajectory`。
+10. 路径优化度日志会写入 `path_metrics_<time>.txt`。
 
 你在 RViz 中观察路径优化时，最关键的可视化对象通常是：
 
 - `Path`：算法真实执行的路径
-- `ShortestPath`：理论最短可达路径
+- `CurrentShortestPath`：当前目标的理论最短可达路径
+- `ShortestPath`：历史理论最短可达路径，便于和 `Trajectory` 一起累计观察
 - `Trajectory`：车辆真实走过的轨迹
 - `OverallMap`：路径参考底图
 
@@ -504,7 +512,7 @@ colcon build --packages-select vehicle_simulator
 source install/setup.bash
 ```
 
-### 10.2 RViz 中没有 ShortestPath
+### 10.2 RViz 中没有 CurrentShortestPath 或 ShortestPath
 
 出现条件：
 
@@ -519,7 +527,18 @@ source install/setup.bash
 - 调整 `visualization_tools.launch` 里的 A* 栅格参数
 - 检查 preview 点云是否覆盖该区域
 
-### 10.3 为什么日志里一个文件会有多段路径
+### 10.3 为什么红色 ShortestPath 以前看起来会穿过障碍物
+
+旧版本把历史最短路径也作为 `nav_msgs/msg/Path` 发布。`Path` 在 RViz 中会把所有相邻 pose 自动连线，因此当系统重新规划、切换 waypoint 或替换当前目标的最短路径时，上一段路径的末端和下一段路径的起点会被 RViz 画成一条不存在的直线。这条直线没有经过 A*，所以可能看起来穿过墙体或障碍物。
+
+当前版本已修改为：
+
+- `CurrentShortestPath`：仍使用 `/shortest_path` 的 `nav_msgs/msg/Path`，只显示当前目标的连续 A* 路径。
+- `ShortestPath`：改用 `/shortest_path_history` 的 `visualization_msgs/msg/MarkerArray`，内部使用 `LINE_LIST` 独立绘制每一段历史线段。
+
+因此历史最短路径不会再因为 RViz 自动补线而出现假穿障。如果 `CurrentShortestPath` 本身贴近障碍物，可以继续调大 `shortestPathObstacleInflation` 或 `shortestPathLineCheckRadius`。
+
+### 10.4 为什么日志里一个文件会有多段路径
 
 因为一次运行过程中你可能点击了多个目标点。
 
@@ -529,7 +548,7 @@ source install/setup.bash
 - 一个文件里可以包含多段 waypoint 任务
 - 离线分析脚本会自动把这些段拆分出来并分别统计
 
-### 10.4 多个仿真实例同时运行怎么办
+### 10.5 多个仿真实例同时运行怎么办
 
 建议设置不同的 `ROS_DOMAIN_ID`：
 

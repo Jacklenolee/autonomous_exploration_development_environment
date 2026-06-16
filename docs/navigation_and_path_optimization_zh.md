@@ -906,15 +906,27 @@ shortestPathLineCheckRadius = 0.15m
 
 ### 6.6 发布最短路径
 
-最终结果以 `nav_msgs/msg/Path` 发布：
+当前最短路径和历史最短路径分开发布：
 
 - [publishShortestPath()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:651)
 
-话题：
+当前 waypoint 的最短路径：
 
 ```text
 /shortest_path
 ```
+
+消息类型为 `nav_msgs/msg/Path`，RViz 中显示名称为 `CurrentShortestPath`。它只表示当前目标点的 A* 结果，因此同一条消息内部可以按顺序连成连续折线。
+
+历史最短路径：
+
+```text
+/shortest_path_history
+```
+
+消息类型为 `visualization_msgs/msg/MarkerArray`，RViz 中显示名称为 `ShortestPath`。内部使用 `Marker::LINE_LIST`，每两个点组成一条独立线段。这样可以累计显示多次 waypoint 或多次重规划的最短路径历史，同时不会让 RViz 把上一段路径终点和下一段路径起点自动连成一条不存在的直线。
+
+这项修改非常关键：旧版本如果把历史最短路径也作为 `nav_msgs/msg/Path` 发布，RViz 会强制连接所有相邻 pose。重新规划或切换目标后，显示层会出现一条没有经过 A* 检查的假直线，看起来就像“红色最短路径穿过障碍物”。当前版本用 `LINE_LIST` 后，历史显示只画真实 A* 段内的线，不再跨段补线。
 
 ## 7. 路径优化度日志是怎么生成的
 
