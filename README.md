@@ -446,6 +446,21 @@ Run the analyzer on the latest path metric log:
 python3 src/visualization_tools/scripts/analyze_path_optimization.py
 ```
 
+Analyze one specific log:
+
+```bash
+python3 src/visualization_tools/scripts/analyze_path_optimization.py \
+  src/vehicle_simulator/log/path_metrics_2026-6-15-23-7-42.txt
+```
+
+Analyze several specific logs together:
+
+```bash
+python3 src/visualization_tools/scripts/analyze_path_optimization.py \
+  path_metrics_2026-6-15-22-56-11.txt \
+  path_metrics_2026-6-15-23-1-14.txt
+```
+
 Analyze all matching logs:
 
 ```bash

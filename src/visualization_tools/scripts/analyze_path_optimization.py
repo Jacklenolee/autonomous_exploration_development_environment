@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
         description="Analyze path optimization logs and generate plots + HTML report."
     )
     parser.add_argument(
+        "logs",
+        nargs="*",
+        help="Specific path_metrics log files to analyze. If omitted, the script uses --all or the latest matching file.",
+    )
+    parser.add_argument(
         "--log-dir",
         default="src/vehicle_simulator/log",
         help="Directory containing path_metrics_*.txt files.",
@@ -442,6 +447,23 @@ def collect_input_files(log_dir: Path, pattern: str, analyze_all: bool) -> List[
     return [files[-1]]
 
 
+def resolve_explicit_files(raw_paths: List[str], log_dir: Path) -> List[Path]:
+    resolved: List[Path] = []
+    for raw_path in raw_paths:
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+            if not path.exists():
+                path = (log_dir / raw_path).resolve()
+        else:
+            path = path.resolve()
+
+        if not path.exists():
+            raise FileNotFoundError(f"Log file not found: {raw_path}")
+        resolved.append(path)
+    return resolved
+
+
 def main() -> int:
     args = parse_args()
     log_dir = Path(args.log_dir).resolve()
@@ -449,7 +471,10 @@ def main() -> int:
         print(f"Log directory not found: {log_dir}")
         return 1
 
-    files = collect_input_files(log_dir, args.pattern, args.all)
+    if args.logs:
+        files = resolve_explicit_files(args.logs, log_dir)
+    else:
+        files = collect_input_files(log_dir, args.pattern, args.all)
     if not files:
         print(f"No log files matched {args.pattern} in {log_dir}")
         return 1
