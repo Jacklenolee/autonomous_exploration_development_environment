@@ -164,30 +164,72 @@ Waypoint -> localPlanner -> /path -> pathFollower -> /cmd_vel -> vehicleSimulato
 
 ### 4.2 候选路径族来源
 
-`localPlanner` 在初始化时会读取预生成路径文件：
+`localPlanner` 不是每一帧从零开始求一条连续曲线，而是先离线生成一套路径模板，运行时在这些模板中快速筛选。
+
+离线生成脚本是：
+
+- [path_generator.m](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/paths/path_generator.m:1)
+
+运行时读取的文件是：
 
 - `startPaths.ply`
 - `paths.ply`
 - `pathList.ply`
 - `correspondences.txt`
 
-对应函数：
+对应读取函数：
 
 - [readStartPaths()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:349)
 - [readPaths()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:383)
 - [readPathList()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:424)
 - [readCorrespondences()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:462)
 
-其中：
+这四个文件的作用不同：
+
+| 文件 | 主要内容 | 运行时用途 |
+| --- | --- | --- |
+| `startPaths.ply` | 7 组短起步路径点，每个点带 `group_id` | 最终选中某个组以后，从这里取对应组的点，旋转、缩放、裁剪后发布为 `/path` |
+| `paths.ply` | 343 条完整候选路径的采样点，每个点带 `path_id` 和 `group_id` | 离线阶段用于生成 `correspondences.txt`；运行时在宏开关 `PLOTPATHSET == 1` 时读取，用于发布 `/free_paths` 可视化 |
+| `pathList.ply` | 每条候选路径的终点、`path_id`、`group_id` | 建立“343 条详细路径 -> 7 个执行组”的映射，并计算每条详细路径的末端方向 |
+| `correspondences.txt` | 每个局部体素对应会被该体素阻挡的路径编号列表 | 运行时快速判断某个障碍点会影响哪些候选路径 |
+
+`pathNum = 343` 和 `groupNum = 7` 定义在：
+
+- [localPlanner.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:92)
+
+具体含义是：
 
 - `pathNum = 343`
+  表示有 343 条详细候选路径。它们参与障碍物碰撞计数、地形代价计算和方向评分。
 - `groupNum = 7`
+  表示最终可执行的短起步路径分成 7 个组。343 条详细路径会按 `pathList[pathID]` 投票累加到这 7 个组里，最终 `/path` 输出的是某个 `startPaths[groupID]`。
 
-含义可以理解为：
+为什么刚好是 343 和 7：
 
-- 系统预先离线生成了很多局部轨迹模板
-- 运行时不从零连续优化整条曲线
-- 而是从这些模板里快速筛选一个当前最合适的
+- `path_generator.m` 里第一段转向 `shift1` 从 `-27` 到 `27`，步长 `9`，一共 7 种，因此形成 7 个 `groupID`。
+- 每个 `groupID` 下继续枚举第二段 `shift2` 的 7 种变化和第三段 `shift3` 的 7 种变化。
+- 总数就是 `7 * 7 * 7 = 343` 条详细候选路径。
+
+运行时还会把这 343 条路径按 36 个旋转方向复用：
+
+```text
+rotDir = 0 ... 35
+rotAng = 10 * rotDir - 180 degrees
+```
+
+因此实际参与评分的组合是：
+
+```text
+36 * 343 = 12348 个“旋转方向 + 详细路径”组合
+```
+
+但最终分组得分只有：
+
+```text
+36 * 7 = 252 个“旋转方向 + 执行组”组合
+```
+
+这样做的好处是：详细路径很多，利于判断局部可行性；最终执行组较少，利于输出稳定、连续、可跟踪的局部路径。
 
 ### 4.3 点云转到车体局部坐标系
 
@@ -223,7 +265,29 @@ Waypoint -> localPlanner -> /path -> pathFollower -> /cmd_vel -> vehicleSimulato
 - 网格参数：[localPlanner.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:94)
 - 对应表加载：[localPlanner.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:462)
 
-工作机制：
+局部体素参数是：
+
+```text
+gridVoxelSize = 0.02
+searchRadius = 0.45
+gridVoxelOffsetX = 3.2
+gridVoxelOffsetY = 4.5
+gridVoxelNumX = 161
+gridVoxelNumY = 451
+```
+
+离线阶段，`path_generator.m` 会先生成这个二维体素网格，然后用 `rangesearch()` 查找每个体素附近 `searchRadius = 0.45m` 内有哪些路径采样点：
+
+- 体素生成：[path_generator.m](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/paths/path_generator.m:113)
+- 路径-体素对应关系生成：[path_generator.m](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/paths/path_generator.m:143)
+
+也就是说，`correspondences.txt` 本质上是一张离线预计算的反向查表：
+
+```text
+体素编号 ind -> 经过或靠近这个体素的 pathID 列表
+```
+
+运行时工作机制：
 
 1. 将障碍点投影到局部体素网格
 2. 查 `correspondences[ind]`
@@ -236,9 +300,69 @@ Waypoint -> localPlanner -> /path -> pathFollower -> /cmd_vel -> vehicleSimulato
 
 这里的设计非常高效，因为它避免了“逐点逐路径逐几何体精确碰撞检测”的昂贵计算。
 
+#### 4.5.1 障碍物是不是按高度判断
+
+是按“相对局部地面的高度差”判断，而不是简单按世界坐标 `z` 判断。
+
+当 `useTerrainAnalysis = true` 时，`localPlanner` 使用 `/terrain_map`。`terrainAnalysis` 会先估计局部地面高度 `planarVoxelElev`，然后把点相对局部地面的高度差写入 `point.intensity`：
+
+- 高度差计算：[terrainAnalysis.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/terrain_analysis/src/terrainAnalysis.cpp:591)
+- 写入 `intensity`：[terrainAnalysis.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/terrain_analysis/src/terrainAnalysis.cpp:600)
+
+因此在 `localPlanner` 中：
+
+```text
+h = plannerCloudCrop[i].intensity
+```
+
+这里的 `h` 不是原始反射强度，也不是世界坐标高度，而是“该点高出局部地面的高度差”。
+
+默认阈值在：
+
+- [local_planner.launch](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/launch/local_planner.launch:23)
+
+默认值是：
+
+```text
+useTerrainAnalysis = true
+obstacleHeightThre = 0.15
+groundHeightThre = 0.10
+costHeightThre = 0.10
+useCost = false
+pointPerPathThre = 2
+```
+
+判断逻辑在：
+
+- [terrainCloudHandler()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:186)
+- [碰撞计数与代价更新](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:793)
+
+规则可以写成：
+
+```text
+如果 h > obstacleHeightThre：
+    认为这是硬障碍
+    clearPathList[rotDir, pathID] += 1
+
+否则如果 h > groundHeightThre：
+    认为这是较高但未达到硬障碍的地形代价
+    pathPenaltyList[rotDir, pathID] = max(pathPenaltyList[rotDir, pathID], h)
+```
+
+需要注意一个参数细节：
+
+- 默认 `useCost = false` 时，`terrainCloudHandler()` 只把 `point.intensity > obstacleHeightThre` 的点送入局部规划器，所以默认更偏向“硬障碍避障”。
+- 如果把 `useCost = true`，低于硬障碍阈值但高于地面阈值的点也会进入规划器，`pathPenaltyList` 的软代价作用会更明显。
+- 如果 `useTerrainAnalysis = false`，则局部规划器使用原始点云，满足局部高度窗口的点会被直接当作障碍处理。
+
+所以你问的“是不是 `correspondences[ind]` 给对应路径编号增加代价”，答案是：是的，但分两种情况。
+
+- 硬障碍：对 `correspondences[ind]` 中每个 `pathID` 增加阻挡计数 `clearPathList`。
+- 软地形代价：对 `correspondences[ind]` 中每个 `pathID` 更新最大地形代价 `pathPenaltyList`。
+
 ### 4.6 路径评分与分组选择
 
-对没有被阻挡的路径，系统会计算一个分数：
+对没有被硬障碍阻挡的路径，系统会计算一个分数。
 
 - 越接近目标方向，分数越高
 - 越少碰到高代价地形，分数越高
@@ -250,6 +374,88 @@ Waypoint -> localPlanner -> /path -> pathFollower -> /cmd_vel -> vehicleSimulato
 - 分组累计得分：[localPlanner.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:849)
 - 选最大分组：[localPlanner.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:855)
 
+具体流程如下。
+
+第一步，判断路径是否硬阻挡：
+
+```text
+如果 clearPathList[rotDir, pathID] < pointPerPathThre：
+    这条路径仍被认为可用
+否则：
+    这条路径被认为被障碍阻挡
+```
+
+默认 `pointPerPathThre = 2`，意思是同一条路径至少被 2 个障碍体素命中才会被判定为不可行。这样可以减少单个噪声点导致整条路径失效。
+
+第二步，计算地形代价分数：
+
+```text
+penaltyScore = 1.0 - pathPenaltyList[i] / costHeightThre
+penaltyScore = max(penaltyScore, costScore)
+```
+
+含义：
+
+- `pathPenaltyList[i]` 越大，说明这条路径附近越可能有凸起、台阶、低矮障碍等高代价地形。
+- `penaltyScore` 越小，这条路径得分越低。
+- `costScore` 是下限，避免软代价把得分直接压成负数。
+
+第三步，计算目标方向误差：
+
+```text
+dirDiff = abs(joyDir - endDirPathList[pathID] - rotDeg)
+```
+
+其中：
+
+- `joyDir` 是当前车辆指向目标点的方向。
+- `endDirPathList[pathID]` 是该条详细候选路径终点方向，由 `pathList.ply` 的终点坐标计算得到。
+- `rotDeg = 10 * rotDir - 180` 是当前路径模板被旋转到的方向。
+
+`dirDiff` 会被归一化到 `0 ~ 180` 度。越小，说明这条候选路径越朝向目标。
+
+第四步，计算旋转方向权重：
+
+```text
+if rotDir < 18:
+    rotDirW = abs(abs(rotDir - 9) + 1)
+else:
+    rotDirW = abs(abs(rotDir - 27) + 1)
+```
+
+这个权重是原始局部规划器里的方向偏置项。它会让某些旋转方向更容易累积分数，特别是前进/后退附近的方向比纯侧向方向更强。
+
+第五步，计算详细路径得分：
+
+```text
+score = (1 - sqrt(sqrt(dirWeight * dirDiff))) * rotDirW^4 * penaltyScore
+```
+
+代码中只有 `score > 0` 时才会计入分组。
+
+这表示：
+
+- `dirDiff` 越小，方向项越接近 1，分数越高。
+- `pathPenaltyList` 越小，`penaltyScore` 越接近 1，分数越高。
+- 如果方向差太大，方向项会变成 0 或负数，该路径不会给分组贡献得分。
+
+第六步，把详细路径分数累加到执行组：
+
+```text
+groupID = pathList[pathID]
+clearPathPerGroupScore[rotDir, groupID] += score
+```
+
+这一步非常关键：系统不是直接选 343 条详细路径中的某一条来执行，而是让 343 条详细路径给 7 个组投票。某个组里越多详细路径可行、越朝向目标、地形代价越低，该组的累计分数越高。
+
+最后，系统在 `36 * 7` 个“旋转方向 + 执行组”里选最大得分：
+
+```text
+selected = argmax clearPathPerGroupScore[rotDir, groupID]
+```
+
+如果开启 `checkRotObstacle`，还会额外检查原地转向时车体附近障碍物是否会碰撞；当前默认 `checkRotObstacle = false`。
+
 ### 4.7 输出最终局部路径
 
 选中某个分组后，系统从 `startPaths[groupID]` 中取出一条基础轨迹，再按当前旋转角和尺度进行变换，最终发布为 `/path`。
@@ -258,9 +464,40 @@ Waypoint -> localPlanner -> /path -> pathFollower -> /cmd_vel -> vehicleSimulato
 
 - [localPlanner.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:870)
 
+输出公式可以理解为：
+
+```text
+x_out = pathScale * (cos(rotAng) * x - sin(rotAng) * y)
+y_out = pathScale * (sin(rotAng) * x + cos(rotAng) * y)
+z_out = pathScale * z
+```
+
+并且会按两个条件裁剪：
+
+```text
+路径点距离 <= pathRange
+路径点距离 <= relativeGoalDis
+```
+
+也就是说，如果目标点很近，`/path` 不会继续发布超过目标点的后续模板点。
+
+`/path` 的坐标系是：
+
+```text
+frame_id = vehicle
+```
+
+所以 `/path` 是车辆局部坐标系下的短期执行路径。它不是从起点到终点的一整条全局路径，而是局部规划器不断重算、不断发布的局部轨迹段。
+
 如果当前完全找不到可行路径，则发布一个只含原点的退化路径：
 
 - [localPlanner.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:955)
+
+在完全失败之前，规划器还会逐步缩小 `pathScale` 和 `pathRange` 后重试：
+
+- [localPlanner.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/localPlanner.cpp:943)
+
+这表示：如果远距离、大尺度模板找不到可行路径，就尝试更短、更保守的局部路径。
 
 ## 5. 路径跟踪器如何把路径变成控制命令
 
@@ -276,6 +513,14 @@ Waypoint -> localPlanner -> /path -> pathFollower -> /cmd_vel -> vehicleSimulato
 
 - [pathHandler()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:113)
 
+这里有一个很重要的设计：
+
+```text
+vehicleXRec, vehicleYRec, vehicleYawRec
+```
+
+记录的是“收到这条 `/path` 时车辆的位姿”。因为 `/path` 是 `vehicle` 坐标系下发布的局部路径，`pathFollower` 后续要把车辆实时运动量换算回“这条路径刚发布时的局部坐标系”，才能知道车辆相对这条路径走到了哪里。
+
 ### 5.2 前视点跟踪
 
 `pathFollower` 使用典型的 look-ahead 跟踪方式：
@@ -287,9 +532,101 @@ Waypoint -> localPlanner -> /path -> pathFollower -> /cmd_vel -> vehicleSimulato
 
 关键代码：
 
-- 寻找前视点：[pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:271)
-- 计算方向误差：[pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:286)
-- 角速度控制：[pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:307)
+- 计算车辆相对路径坐标：[pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:277)
+- 寻找前视点：[pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:288)
+- 角速度控制：[pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:329)
+
+具体计算过程如下。
+
+第一步，计算车辆相对路径坐标：
+
+```text
+vehicleXRel = cos(vehicleYawRec) * (vehicleX - vehicleXRec)
+            + sin(vehicleYawRec) * (vehicleY - vehicleYRec)
+
+vehicleYRel = -sin(vehicleYawRec) * (vehicleX - vehicleXRec)
+            + cos(vehicleYawRec) * (vehicleY - vehicleYRec)
+```
+
+对应代码：
+
+- [pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:277)
+
+这一步把当前车辆位置转换到“收到 `/path` 那一刻的车辆局部坐标系”。
+
+第二步，沿路径点向前找前视点：
+
+```text
+while pathPointID < pathSize - 1:
+    dis = distance(path[pathPointID], vehicleRel)
+    if dis < lookAheadDis:
+        pathPointID += 1
+    else:
+        break
+```
+
+默认前视距离：
+
+```text
+lookAheadDis = 0.5m
+```
+
+对应参数：
+
+- [local_planner.launch](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/launch/local_planner.launch:61)
+
+含义是：路径点如果已经离车辆太近，就继续向前找，直到找到一个距离车辆至少约 `0.5m` 的目标点。
+
+第三步，计算车辆指向前视点的方向：
+
+```text
+pathDir = atan2(disY, disX)
+```
+
+对应代码：
+
+- [pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:300)
+
+第四步，计算方向误差：
+
+```text
+dirDiff = vehicleYaw - vehicleYawRec - pathDir
+```
+
+并归一化到 `[-pi, pi]`。
+
+对应代码：
+
+- [pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:305)
+
+第五步，根据方向误差输出角速度：
+
+```text
+if abs(vehicleSpeed) 很小:
+    vehicleYawRate = -stopYawRateGain * dirDiff
+else:
+    vehicleYawRate = -yawRateGain * dirDiff
+```
+
+然后限制到：
+
+```text
+[-maxYawRate, maxYawRate]
+```
+
+对应代码：
+
+- [pathFollower.cpp](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/local_planner/src/pathFollower.cpp:329)
+
+默认参数：
+
+```text
+yawRateGain = 7.5
+stopYawRateGain = 7.5
+maxYawRate = 90 deg/s
+```
+
+因此它的控制思想是：车辆朝向偏离前视点方向越大，输出的角速度越大；接近目标或路径退化时，角速度会被置零或限制。
 
 ### 5.3 速度控制
 
