@@ -527,6 +527,15 @@ source install/setup.bash
 - 调整 `visualization_tools.launch` 里的 A* 栅格参数
 - 检查 preview 点云是否覆盖该区域
 
+第二次或多次点击 waypoint 后，如果 `Path`、`Trajectory`、`ShortestPath` 历史都还在，但 `CurrentShortestPath` 突然不显示，通常表示当前 A* 在“静态地图 + 实时激光动态障碍”的合并栅格上没有找到可达路径。常见原因是车辆附近实时扫描点、墙边点云或窄通道被 `shortestPathDynamicObstacleInflation` 膨胀后临时堵住了起点、终点或通道。
+
+当前版本已增加兜底策略：
+
+- 优先使用静态 preview 地图 + 动态障碍层计算最短路径。
+- 如果动态障碍层导致 A* 失败，会自动退回静态 preview 地图再计算一次。
+- 如果兜底成功，RViz 会继续显示 `CurrentShortestPath`，终端会输出一条 warning 说明动态栅格临时堵住了路径。
+- 如果静态地图也失败，终端会输出具体失败原因，例如目标超出地图、附近没有自由格、A* 无法连通等。
+
 ### 10.3 为什么红色 ShortestPath 以前看起来会穿过障碍物
 
 旧版本把历史最短路径也作为 `nav_msgs/msg/Path` 发布。`Path` 在 RViz 中会把所有相邻 pose 自动连线，因此当系统重新规划、切换 waypoint 或替换当前目标的最短路径时，上一段路径的末端和下一段路径的起点会被 RViz 画成一条不存在的直线。这条直线没有经过 A*，所以可能看起来穿过墙体或障碍物。

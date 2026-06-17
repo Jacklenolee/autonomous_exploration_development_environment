@@ -810,6 +810,21 @@ shortestPathGridResolution = 0.2m
 
 - [replanIfDynamicObstaclesBlockShortestPath()](/home/gh/Explore_Report/autonomous_exploration_development_environment/src/visualization_tools/src/visualizationTools.cpp:742)
 
+#### 6.3.7 动态障碍失败兜底
+
+第二次或多次点击 waypoint 时，`CurrentShortestPath` 有时会消失，而 `Path`、`Trajectory` 和 `ShortestPath` 历史仍然正常。这个现象通常不是 RViz 显示插件坏了，而是当前 A* 计算失败了。
+
+原因是第二次点击时车辆已经移动，实时 `/registered_scan` 中会出现新的近距离点云。动态障碍层会把这些点投影到 A* 栅格并按 `shortestPathDynamicObstacleInflation` 膨胀。如果车辆贴近墙体、目标点在墙边、通道较窄，动态膨胀可能会把起点附近、目标附近或中间通道临时堵住。此时合并栅格上不存在从起点到终点的连通自由区域，`/shortest_path` 就会被发布为空路径。
+
+当前版本采用两级计算：
+
+1. 优先使用“静态 preview 地图 + 动态障碍层”的合并栅格计算 A*。
+2. 如果合并栅格失败，并且确实存在动态障碍层，则自动退回静态 preview 地图再计算一次。
+3. 如果静态地图能找到路，继续发布 `CurrentShortestPath`，并在终端输出 warning，说明动态栅格临时堵住了路径。
+4. 如果静态地图也失败，则保留上一条有效最短路径，并输出具体失败原因，例如目标超出地图、起终点附近没有自由格、A* 无法连通等。
+
+这样处理的目的不是忽略障碍物，而是避免瞬时激光噪声或临时膨胀把评估用最短路径完全清空。真正用于评估的 `L_shortest` 仍然来自障碍物约束 A*；当动态层可靠时优先使用动态层，当动态层导致不可达时才退回静态地图基准。
+
 ### 6.4 A* 搜索过程
 
 真正的 A* 在：

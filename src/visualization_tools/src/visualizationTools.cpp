@@ -99,6 +99,7 @@ float pathActualDis = 0, shortestPathDis = 0;
 float actualToShortestRatio = 0, pathOptimization = 0;
 bool shortestPathInited = false;
 bool shortestPathGridReady = false;
+string shortestPathLastFailureReason;
 int shortestPathGridWidth = 0, shortestPathGridHeight = 0;
 float shortestPathGridMinX = 0, shortestPathGridMinY = 0;
 float shortestPathFloorZ = 0;
@@ -177,6 +178,12 @@ geometry_msgs::msg::Point gridToWorld(int ix, int iy, float z)
 bool isFreeCell(int ix, int iy)
 {
   return isInsideGrid(ix, iy) && shortestPathGrid[gridIndex(ix, iy)] == 0;
+}
+
+bool hasDynamicShortestPathObstacles()
+{
+  return std::any_of(shortestPathDynamicObstacleGrid.begin(), shortestPathDynamicObstacleGrid.end(),
+                     [](unsigned char value) { return value != 0; });
 }
 
 void setInflatedGridCells(vector<unsigned char>& grid, int cx, int cy, int radiusCells, unsigned char value)
@@ -467,18 +474,21 @@ float computePolylineLength(const vector<geometry_msgs::msg::Point>& points)
   return length;
 }
 
-bool computeObstacleAwareShortestPath()
+bool computeShortestPathOnActiveGrid()
 {
   shortestPathPoints.clear();
   shortestPathDis = 0;
+  shortestPathLastFailureReason.clear();
 
   if (!shortestPathGridReady) {
+    shortestPathLastFailureReason = "shortest path grid is not ready";
     return false;
   }
 
   int originalStartX, originalStartY, originalGoalX, originalGoalY;
   if (!worldToGrid(pathStartX, pathStartY, originalStartX, originalStartY) ||
       !worldToGrid(pathGoalX, pathGoalY, originalGoalX, originalGoalY)) {
+    shortestPathLastFailureReason = "start or goal is outside the preview map";
     return false;
   }
 
@@ -487,6 +497,7 @@ bool computeObstacleAwareShortestPath()
   int goalX = originalGoalX;
   int goalY = originalGoalY;
   if (!findNearestFreeCell(startX, startY) || !findNearestFreeCell(goalX, goalY)) {
+    shortestPathLastFailureReason = "start or goal has no nearby free cell";
     return false;
   }
 
@@ -566,6 +577,7 @@ bool computeObstacleAwareShortestPath()
   }
 
   if (!std::isfinite(gScore[goalIndex])) {
+    shortestPathLastFailureReason = "A* cannot connect start and goal on the active grid";
     return false;
   }
 
@@ -578,6 +590,7 @@ bool computeObstacleAwareShortestPath()
   }
 
   if (rawPath.empty() || rawPath.back() != startIndex) {
+    shortestPathLastFailureReason = "A* backtracking failed";
     return false;
   }
 
@@ -629,7 +642,42 @@ bool computeObstacleAwareShortestPath()
   }
 
   shortestPathDis = computePolylineLength(shortestPathPoints);
-  return shortestPathPoints.size() >= 2 && shortestPathDis > 1e-3;
+  if (shortestPathPoints.size() < 2 || shortestPathDis <= 1e-3) {
+    shortestPathLastFailureReason = "computed shortest path is too short";
+    return false;
+  }
+
+  return true;
+}
+
+bool computeObstacleAwareShortestPath()
+{
+  vector<unsigned char> combinedGrid = shortestPathGrid;
+  bool planned = computeShortestPathOnActiveGrid();
+  if (planned) {
+    return true;
+  }
+
+  string combinedFailureReason = shortestPathLastFailureReason;
+  if (shortestPathUseDynamicObstacles && hasDynamicShortestPathObstacles() &&
+      !shortestPathStaticGrid.empty()) {
+    shortestPathGrid = shortestPathStaticGrid;
+    planned = computeShortestPathOnActiveGrid();
+    string staticFailureReason = shortestPathLastFailureReason;
+    shortestPathGrid = combinedGrid;
+
+    if (planned) {
+      RCLCPP_WARN(rclcpp::get_logger("visualizationTools"),
+                  "Shortest path was blocked by the temporary dynamic grid (%s). Retried on the static preview map and found a route.",
+                  combinedFailureReason.c_str());
+      return true;
+    }
+
+    shortestPathLastFailureReason = "dynamic grid: " + combinedFailureReason +
+                                    "; static fallback: " + staticFailureReason;
+  }
+
+  return false;
 }
 
 void publishShortestPath(const builtin_interfaces::msg::Time& stamp)
@@ -767,7 +815,8 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
 
   if (!shortestPathInited) {
     RCLCPP_WARN(rclcpp::get_logger("visualizationTools"),
-                "Failed to compute obstacle-aware shortest path from waypoint. Check map bounds, obstacle filters, or goal reachability.");
+                "Failed to compute obstacle-aware shortest path from waypoint: %s. Check map bounds, obstacle filters, or goal reachability.",
+                shortestPathLastFailureReason.c_str());
     shortestPathPoints = previousShortestPathPoints;
     shortestPathDis = previousShortestPathDis;
     shortestPathInited = previousShortestPathInited;
