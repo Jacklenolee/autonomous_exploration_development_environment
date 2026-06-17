@@ -939,7 +939,7 @@ shortestPathLineCheckRadius = 0.15m
 /shortest_path_history
 ```
 
-消息类型为 `visualization_msgs/msg/MarkerArray`，RViz 中显示名称为 `ShortestPath`。内部使用 `Marker::LINE_LIST`，每两个点组成一条独立线段。这样可以像 `Trajectory` 一样持续追加多次 waypoint、多次重规划以及车辆运动过程中的最短路径历史，同时不会让 RViz 把上一段路径终点和下一段路径起点自动连成一条不存在的直线。
+消息类型为 `visualization_msgs/msg/MarkerArray`，RViz 中显示名称为 `ShortestPath`。内部使用 `Marker::LINE_STRIP`。每次点击 waypoint 并成功规划后，系统会把这一整段理论最短路径追加到红色历史轨迹；下一次 waypoint 成功规划后，再把下一整段追加进去。这样红色 `ShortestPath` 表示“每次任务级规划得到的理论最短路径轨迹”，可以和实际 `Trajectory` 做整体对比。
 
 为了避免第二段、第三段历史最短路径与 `CurrentShortestPath` 或实际轨迹重合后被遮住，历史 marker 还做了可视化偏移：
 
@@ -950,17 +950,17 @@ shortestPathHistoryLineWidth = 0.12m
 
 这两个参数只影响 RViz 显示，不改变 A* 计算出的 `L_shortest`。
 
-为了让红色历史线在车辆继续行驶时也继续增长，系统还会在 `odometryHandler()` 中按间隔从当前车辆位置重新计算到目标点的 A*，并只追加靠近车辆前方的一段最短路径前缀：
+注意，红色历史线不会在车辆每次 odometry 更新时反复追加局部前缀。它只在新的 waypoint 成功规划时追加整段最短路径。这样做是为了避免短前缀反复叠加导致轨迹又断又乱，并保持和本系统实际 `/path`、`/trajectory` 的任务级记录思路一致：
 
 ```text
-shortestPathHistoryAppendInterval = 0.5s
-shortestPathHistoryAppendMinDistance = 0.3m
-shortestPathHistoryAppendLookAhead = 2.0m
+waypoint 1 -> shortest path segment 1
+waypoint 2 -> shortest path segment 2
+waypoint 3 -> shortest path segment 3
 ```
 
-也就是说，`CurrentShortestPath` 仍然表示当前车位到目标点的完整参考最短路；`ShortestPath` 历史则记录车辆行驶过程中不断生成的前方参考段。这样它的行为更接近 `Trajectory`：车辆越往前走，红色历史最短路径也越往后持续补全。
+`CurrentShortestPath` 仍然表示当前 waypoint 的完整参考最短路；`ShortestPath` 历史则表示已经完成/规划过的多个 waypoint 理论最短路拼接轨迹。
 
-这项修改非常关键：旧版本如果把历史最短路径也作为 `nav_msgs/msg/Path` 发布，RViz 会强制连接所有相邻 pose。重新规划或切换目标后，显示层会出现一条没有经过 A* 检查的假直线，看起来就像“红色最短路径穿过障碍物”。当前版本用 `LINE_LIST` 后，历史显示只画真实 A* 段内的线，不再跨段补线。
+这项修改非常关键：旧版本如果把历史最短路径也作为 `nav_msgs/msg/Path` 发布，RViz 会强制连接所有相邻 pose。当前版本使用 marker 控制历史轨迹显示，并且只在 waypoint 成功规划时追加整段路径，避免车辆行驶中反复追加短前缀造成混乱。
 
 ## 7. 路径优化度日志是怎么生成的
 

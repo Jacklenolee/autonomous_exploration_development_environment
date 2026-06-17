@@ -65,9 +65,6 @@ double shortestPathLineCheckResolution = 0.05;
 double shortestPathLineCheckRadius = 0.15;
 double shortestPathHistoryLineWidth = 0.12;
 double shortestPathHistoryZOffset = 0.12;
-double shortestPathHistoryAppendInterval = 0.5;
-double shortestPathHistoryAppendMinDistance = 0.3;
-double shortestPathHistoryAppendLookAhead = 2.0;
 bool shortestPathUseDynamicObstacles = true;
 double shortestPathDynamicObstacleMinZ = 0.2;
 double shortestPathDynamicObstacleMaxZ = 2.0;
@@ -115,11 +112,6 @@ vector<geometry_msgs::msg::Point> shortestPathPoints;
 vector<geometry_msgs::msg::Point> shortestPathHistoryLinePoints;
 bool shortestPathDynamicGridDirty = false;
 double shortestPathLastReplanTime = 0;
-double shortestPathLastHistoryAppendTime = -1e6;
-float shortestPathLastHistoryAppendX = 0;
-float shortestPathLastHistoryAppendY = 0;
-float shortestPathLastHistoryAppendZ = 0;
-bool shortestPathHistoryAppendInited = false;
 
 pcl::VoxelGrid<pcl::PointXYZ> overallMapDwzFilter;
 pcl::VoxelGrid<pcl::PointXYZI> exploredAreaDwzFilter;
@@ -330,54 +322,22 @@ void appendShortestPathToHistory()
     return;
   }
 
+  if (!shortestPathHistoryLinePoints.empty()) {
+    const geometry_msgs::msg::Point& lastPoint = shortestPathHistoryLinePoints.back();
+    const geometry_msgs::msg::Point& firstPoint = shortestPathPoints.front();
+    float dx = firstPoint.x - lastPoint.x;
+    float dy = firstPoint.y - lastPoint.y;
+    float dz = firstPoint.z - lastPoint.z;
+    if (dx * dx + dy * dy + dz * dz > 1e-6) {
+      shortestPathHistoryLinePoints.push_back(firstPoint);
+    }
+  } else {
+    shortestPathHistoryLinePoints.push_back(shortestPathPoints.front());
+  }
+
   for (size_t i = 1; i < shortestPathPoints.size(); i++) {
-    shortestPathHistoryLinePoints.push_back(shortestPathPoints[i - 1]);
     shortestPathHistoryLinePoints.push_back(shortestPathPoints[i]);
   }
-}
-
-void appendShortestPathPrefixToHistory(double maxLength)
-{
-  if (shortestPathPoints.size() < 2 || maxLength <= 0) {
-    return;
-  }
-
-  double remainingLength = maxLength;
-  geometry_msgs::msg::Point startPoint = shortestPathPoints.front();
-
-  for (size_t i = 1; i < shortestPathPoints.size() && remainingLength > 0; i++) {
-    geometry_msgs::msg::Point endPoint = shortestPathPoints[i];
-    double dx = endPoint.x - startPoint.x;
-    double dy = endPoint.y - startPoint.y;
-    double dz = endPoint.z - startPoint.z;
-    double segmentLength = sqrt(dx * dx + dy * dy + dz * dz);
-    if (segmentLength < 1e-6) {
-      startPoint = endPoint;
-      continue;
-    }
-
-    if (segmentLength > remainingLength) {
-      double ratio = remainingLength / segmentLength;
-      endPoint.x = startPoint.x + ratio * dx;
-      endPoint.y = startPoint.y + ratio * dy;
-      endPoint.z = startPoint.z + ratio * dz;
-    }
-
-    shortestPathHistoryLinePoints.push_back(startPoint);
-    shortestPathHistoryLinePoints.push_back(endPoint);
-
-    remainingLength -= segmentLength;
-    startPoint = shortestPathPoints[i];
-  }
-}
-
-void updateShortestPathHistoryAppendAnchor()
-{
-  shortestPathLastHistoryAppendTime = systemTime;
-  shortestPathLastHistoryAppendX = vehicleX;
-  shortestPathLastHistoryAppendY = vehicleY;
-  shortestPathLastHistoryAppendZ = vehicleZ;
-  shortestPathHistoryAppendInited = true;
 }
 
 void buildShortestPathGrid()
@@ -746,7 +706,7 @@ void publishShortestPath(const builtin_interfaces::msg::Time& stamp)
   historyMarker.header = shortestPath.header;
   historyMarker.ns = "shortest_path_history";
   historyMarker.id = 0;
-  historyMarker.type = visualization_msgs::msg::Marker::LINE_LIST;
+  historyMarker.type = visualization_msgs::msg::Marker::LINE_STRIP;
   historyMarker.action = visualization_msgs::msg::Marker::ADD;
   historyMarker.pose.position.z = shortestPathHistoryZOffset;
   historyMarker.pose.orientation.w = 1.0;
@@ -789,8 +749,6 @@ bool replanShortestPath(const char* reason)
     return false;
   }
 
-  appendShortestPathToHistory();
-  updateShortestPathHistoryAppendAnchor();
   updatePathOptimization();
   return true;
 }
@@ -825,52 +783,6 @@ bool isShortestPathCollisionFree()
   }
 
   return true;
-}
-
-void appendShortestPathHistoryFromCurrentPose()
-{
-  if (!shortestPathInited || !shortestPathGridReady) {
-    return;
-  }
-
-  if (systemTime - shortestPathLastHistoryAppendTime < shortestPathHistoryAppendInterval) {
-    return;
-  }
-
-  float dx = vehicleX - shortestPathLastHistoryAppendX;
-  float dy = vehicleY - shortestPathLastHistoryAppendY;
-  float dz = vehicleZ - shortestPathLastHistoryAppendZ;
-  if (shortestPathHistoryAppendInited &&
-      sqrt(dx * dx + dy * dy + dz * dz) < shortestPathHistoryAppendMinDistance) {
-    return;
-  }
-
-  vector<geometry_msgs::msg::Point> previousShortestPathPoints = shortestPathPoints;
-  float previousShortestPathDis = shortestPathDis;
-  bool previousShortestPathInited = shortestPathInited;
-  float previousPathStartX = pathStartX;
-  float previousPathStartY = pathStartY;
-  float previousPathStartZ = pathStartZ;
-
-  pathStartX = vehicleX;
-  pathStartY = vehicleY;
-  pathStartZ = vehicleZ;
-  bool planned = computeObstacleAwareShortestPath();
-  if (planned) {
-    appendShortestPathPrefixToHistory(shortestPathHistoryAppendLookAhead);
-    updateShortestPathHistoryAppendAnchor();
-  } else {
-    RCLCPP_WARN(rclcpp::get_logger("visualizationTools"),
-                "Failed to update shortest path history from current pose: %s",
-                shortestPathLastFailureReason.c_str());
-  }
-
-  pathStartX = previousPathStartX;
-  pathStartY = previousPathStartY;
-  pathStartZ = previousPathStartZ;
-  shortestPathPoints = previousShortestPathPoints;
-  shortestPathDis = previousShortestPathDis;
-  shortestPathInited = previousShortestPathInited;
 }
 
 void replanIfDynamicObstaclesBlockShortestPath()
@@ -911,7 +823,6 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
     shortestPathInited = previousShortestPathInited;
   } else {
     appendShortestPathToHistory();
-    updateShortestPathHistoryAppendAnchor();
     shortestPathLastReplanTime = systemTime;
   }
 
@@ -973,7 +884,6 @@ void odometryHandler(const nav_msgs::msg::Odometry::ConstSharedPtr odom)
   vehicleX = odom->pose.pose.position.x;
   vehicleY = odom->pose.pose.position.y;
   vehicleZ = odom->pose.pose.position.z;
-  appendShortestPathHistoryFromCurrentPose();
 
   fprintf(trajFilePtr, "%f %f %f %f %f %f %f\n", vehicleX, vehicleY, vehicleZ, roll, pitch, yaw, timeDuration);
 
@@ -1120,9 +1030,6 @@ int main(int argc, char** argv)
   nh->declare_parameter<double>("shortestPathLineCheckRadius", shortestPathLineCheckRadius);
   nh->declare_parameter<double>("shortestPathHistoryLineWidth", shortestPathHistoryLineWidth);
   nh->declare_parameter<double>("shortestPathHistoryZOffset", shortestPathHistoryZOffset);
-  nh->declare_parameter<double>("shortestPathHistoryAppendInterval", shortestPathHistoryAppendInterval);
-  nh->declare_parameter<double>("shortestPathHistoryAppendMinDistance", shortestPathHistoryAppendMinDistance);
-  nh->declare_parameter<double>("shortestPathHistoryAppendLookAhead", shortestPathHistoryAppendLookAhead);
   nh->declare_parameter<bool>("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
   nh->declare_parameter<double>("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
   nh->declare_parameter<double>("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);
@@ -1154,9 +1061,6 @@ int main(int argc, char** argv)
   nh->get_parameter("shortestPathLineCheckRadius", shortestPathLineCheckRadius);
   nh->get_parameter("shortestPathHistoryLineWidth", shortestPathHistoryLineWidth);
   nh->get_parameter("shortestPathHistoryZOffset", shortestPathHistoryZOffset);
-  nh->get_parameter("shortestPathHistoryAppendInterval", shortestPathHistoryAppendInterval);
-  nh->get_parameter("shortestPathHistoryAppendMinDistance", shortestPathHistoryAppendMinDistance);
-  nh->get_parameter("shortestPathHistoryAppendLookAhead", shortestPathHistoryAppendLookAhead);
   nh->get_parameter("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
   nh->get_parameter("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
   nh->get_parameter("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);
