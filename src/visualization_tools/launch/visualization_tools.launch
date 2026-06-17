@@ -27,6 +27,7 @@
     <param name="shortestPathHistoryZOffset" value="0.12" />
     <param name="shortestPathWaypointDuplicateTime" value="0.2" />
     <param name="shortestPathWaypointDuplicateDistance" value="0.05" />
+    <param name="shortestPathUseRelaxedGroundFallback" value="true" />
     <param name="shortestPathUseDynamicObstacles" value="true" />
     <param name="shortestPathDynamicObstacleMinZ" value="0.2" />
     <param name="shortestPathDynamicObstacleMaxZ" value="2.0" />

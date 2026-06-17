@@ -67,6 +67,7 @@ double shortestPathHistoryLineWidth = 0.12;
 double shortestPathHistoryZOffset = 0.12;
 double shortestPathWaypointDuplicateTime = 0.2;
 double shortestPathWaypointDuplicateDistance = 0.05;
+bool shortestPathUseRelaxedGroundFallback = true;
 bool shortestPathUseDynamicObstacles = true;
 double shortestPathDynamicObstacleMinZ = 0.2;
 double shortestPathDynamicObstacleMaxZ = 2.0;
@@ -103,12 +104,14 @@ float pathActualDis = 0, shortestPathDis = 0;
 float actualToShortestRatio = 0, pathOptimization = 0;
 bool shortestPathInited = false;
 bool shortestPathGridReady = false;
+bool shortestPathCurrentUsesRelaxedGround = false;
 string shortestPathLastFailureReason;
 int shortestPathGridWidth = 0, shortestPathGridHeight = 0;
 float shortestPathGridMinX = 0, shortestPathGridMinY = 0;
 float shortestPathFloorZ = 0;
 vector<unsigned char> shortestPathGrid;
 vector<unsigned char> shortestPathStaticGrid;
+vector<unsigned char> shortestPathRelaxedStaticGrid;
 vector<unsigned char> shortestPathDynamicObstacleGrid;
 vector<geometry_msgs::msg::Point> shortestPathPoints;
 vector<geometry_msgs::msg::Point> shortestPathHistoryLinePoints;
@@ -228,6 +231,22 @@ void updateCombinedShortestPathGrid()
       shortestPathGrid[i] = 1;
     }
   }
+}
+
+vector<unsigned char> overlayDynamicObstacles(const vector<unsigned char>& baseGrid)
+{
+  vector<unsigned char> grid = baseGrid;
+  if (!shortestPathUseDynamicObstacles ||
+      shortestPathDynamicObstacleGrid.size() != grid.size()) {
+    return grid;
+  }
+
+  for (size_t i = 0; i < grid.size(); i++) {
+    if (shortestPathDynamicObstacleGrid[i] != 0) {
+      grid[i] = 1;
+    }
+  }
+  return grid;
 }
 
 bool findNearestFreeCell(int& ix, int& iy)
@@ -492,6 +511,16 @@ void buildShortestPathGrid()
   }
 
   shortestPathStaticGrid = shortestPathGrid;
+  shortestPathRelaxedStaticGrid.assign(shortestPathGridWidth * shortestPathGridHeight, 0);
+  for (int y = 0; y < shortestPathGridHeight; y++) {
+    for (int x = 0; x < shortestPathGridWidth; x++) {
+      if (rawObstacleGrid[gridIndex(x, y)] == 0) {
+        continue;
+      }
+
+      setInflatedGridCells(shortestPathRelaxedStaticGrid, x, y, inflationCells, 1);
+    }
+  }
   shortestPathDynamicObstacleGrid.assign(shortestPathGridWidth * shortestPathGridHeight, 0);
   updateCombinedShortestPathGrid();
   shortestPathGridReady = true;
@@ -690,6 +719,7 @@ bool computeObstacleAwareShortestPath()
   vector<unsigned char> combinedGrid = shortestPathGrid;
   bool planned = computeShortestPathOnActiveGrid();
   if (planned) {
+    shortestPathCurrentUsesRelaxedGround = false;
     return true;
   }
 
@@ -702,6 +732,7 @@ bool computeObstacleAwareShortestPath()
     shortestPathGrid = combinedGrid;
 
     if (planned) {
+      shortestPathCurrentUsesRelaxedGround = false;
       RCLCPP_WARN(rclcpp::get_logger("visualizationTools"),
                   "Shortest path was blocked by the temporary dynamic grid (%s). Retried on the static preview map and found a route.",
                   combinedFailureReason.c_str());
@@ -710,6 +741,26 @@ bool computeObstacleAwareShortestPath()
 
     shortestPathLastFailureReason = "dynamic grid: " + combinedFailureReason +
                                     "; static fallback: " + staticFailureReason;
+  }
+
+  if (shortestPathUseRelaxedGroundFallback && !shortestPathRelaxedStaticGrid.empty()) {
+    string strictFailureReason = shortestPathLastFailureReason.empty() ?
+                                 combinedFailureReason : shortestPathLastFailureReason;
+    shortestPathGrid = overlayDynamicObstacles(shortestPathRelaxedStaticGrid);
+    planned = computeShortestPathOnActiveGrid();
+    string relaxedFailureReason = shortestPathLastFailureReason;
+    shortestPathGrid = combinedGrid;
+
+    if (planned) {
+      shortestPathCurrentUsesRelaxedGround = true;
+      RCLCPP_WARN(rclcpp::get_logger("visualizationTools"),
+                  "Strict shortest path grid failed (%s). Retried with relaxed ground connectivity and found a route.",
+                  strictFailureReason.c_str());
+      return true;
+    }
+
+    shortestPathLastFailureReason = strictFailureReason +
+                                    "; relaxed ground fallback: " + relaxedFailureReason;
   }
 
   return false;
@@ -770,10 +821,12 @@ bool replanShortestPath(const char* reason)
 
   vector<geometry_msgs::msg::Point> previousShortestPathPoints = shortestPathPoints;
   float previousShortestPathDis = shortestPathDis;
+  bool previousShortestPathCurrentUsesRelaxedGround = shortestPathCurrentUsesRelaxedGround;
   bool replanned = computeObstacleAwareShortestPath();
   if (!replanned) {
     shortestPathPoints = previousShortestPathPoints;
     shortestPathDis = previousShortestPathDis;
+    shortestPathCurrentUsesRelaxedGround = previousShortestPathCurrentUsesRelaxedGround;
     RCLCPP_WARN(rclcpp::get_logger("visualizationTools"),
                 "Failed to replan obstacle-aware shortest path after %s. Keeping previous path.", reason);
     return false;
@@ -804,15 +857,27 @@ bool isShortestPathCollisionFree()
     return true;
   }
 
+  vector<unsigned char> strictGrid;
+  if (shortestPathCurrentUsesRelaxedGround && !shortestPathRelaxedStaticGrid.empty()) {
+    strictGrid = shortestPathGrid;
+    shortestPathGrid = overlayDynamicObstacles(shortestPathRelaxedStaticGrid);
+  }
+
+  bool collisionFree = true;
   for (size_t i = 1; i < shortestPathPoints.size(); i++) {
     if (!hasWorldLineOfSight(shortestPathPoints[i - 1].x, shortestPathPoints[i - 1].y,
                              shortestPathPoints[i].x, shortestPathPoints[i].y,
                              shortestPathLineCheckRadius)) {
-      return false;
+      collisionFree = false;
+      break;
     }
   }
 
-  return true;
+  if (!strictGrid.empty()) {
+    shortestPathGrid = strictGrid;
+  }
+
+  return collisionFree;
 }
 
 void replanIfDynamicObstaclesBlockShortestPath()
@@ -843,6 +908,7 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
   vector<geometry_msgs::msg::Point> previousShortestPathPoints = shortestPathPoints;
   float previousShortestPathDis = shortestPathDis;
   bool previousShortestPathInited = shortestPathInited;
+  bool previousShortestPathCurrentUsesRelaxedGround = shortestPathCurrentUsesRelaxedGround;
   shortestPathInited = computeObstacleAwareShortestPath();
 
   if (!shortestPathInited) {
@@ -852,6 +918,7 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
     shortestPathPoints = previousShortestPathPoints;
     shortestPathDis = previousShortestPathDis;
     shortestPathInited = previousShortestPathInited;
+    shortestPathCurrentUsesRelaxedGround = previousShortestPathCurrentUsesRelaxedGround;
   } else {
     if (!duplicateWaypoint) {
       appendShortestPathToHistory();
@@ -1065,6 +1132,7 @@ int main(int argc, char** argv)
   nh->declare_parameter<double>("shortestPathHistoryZOffset", shortestPathHistoryZOffset);
   nh->declare_parameter<double>("shortestPathWaypointDuplicateTime", shortestPathWaypointDuplicateTime);
   nh->declare_parameter<double>("shortestPathWaypointDuplicateDistance", shortestPathWaypointDuplicateDistance);
+  nh->declare_parameter<bool>("shortestPathUseRelaxedGroundFallback", shortestPathUseRelaxedGroundFallback);
   nh->declare_parameter<bool>("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
   nh->declare_parameter<double>("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
   nh->declare_parameter<double>("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);
@@ -1098,6 +1166,7 @@ int main(int argc, char** argv)
   nh->get_parameter("shortestPathHistoryZOffset", shortestPathHistoryZOffset);
   nh->get_parameter("shortestPathWaypointDuplicateTime", shortestPathWaypointDuplicateTime);
   nh->get_parameter("shortestPathWaypointDuplicateDistance", shortestPathWaypointDuplicateDistance);
+  nh->get_parameter("shortestPathUseRelaxedGroundFallback", shortestPathUseRelaxedGroundFallback);
   nh->get_parameter("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
   nh->get_parameter("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
   nh->get_parameter("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);

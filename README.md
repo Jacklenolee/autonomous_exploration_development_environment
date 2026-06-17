@@ -121,6 +121,8 @@ ShortestPath
 
 这两条都不是简单直线。它们基于 preview 点云构建 2D 占据栅格，在考虑障碍物膨胀、地面可通行区域和动态障碍后，用 A* 算法求出可达最短路径。历史显示使用 `MarkerArray/LINE_STRIP`：每次点击 waypoint 并成功规划后，把这一整段理论最短路径追加到红色历史轨迹；下一次 waypoint 再追加下一整段，最终形成一条连续的理论最短路径轨迹，用来和实际 `Trajectory` 对比。历史线还会按 `shortestPathHistoryZOffset` 轻微抬高，并按 `shortestPathHistoryLineWidth` 加粗，避免被当前最短路径或实际轨迹遮住。RViz 的 `Waypoint` 工具一次点击会连续发布两次 `/way_point`，当前版本会用 `shortestPathWaypointDuplicateTime` 和 `shortestPathWaypointDuplicateDistance` 对重复目标点去重，避免第一个 waypoint 就重复追加两条红色历史线。
 
+为了减少远距离 waypoint 因 preview 地面点云稀疏而不显示的问题，当前版本还增加了 `shortestPathUseRelaxedGroundFallback`。A* 会先使用严格的“地面连通 + 障碍膨胀 + 动态障碍”栅格；如果严格栅格无法连通，再尝试“放宽地面连通、仍保留静态/动态障碍膨胀”的兜底栅格。这样可以让远处目标更容易显示参考最短路径，同时不会把已识别的墙体、树木、木板等障碍当成可通行区域。
+
 ### 1.4 新增路径优化度日志
 
 每次点击 RViz 的目标点后，系统会记录：
@@ -521,20 +523,33 @@ source install/setup.bash
 - 起点和终点都在地图范围内
 - 起点和终点位于同一个可达区域
 
-如果没有路径，可尝试：
+如果目标点点得比较远，`CurrentShortestPath` 以前更容易不显示。原因不是 RViz 的显示项坏了，而是 A* 只能在 preview 点云生成的占据栅格上搜索：目标点超出 preview 点云范围、起点和终点之间的地面点云过稀疏、地面膨胀后仍然没有形成连续自由区域、或者障碍物膨胀把窄通道封住时，A* 就会认为“没有从起点到终点的可达连通域”，于是发布空路径。
+
+当前版本已增加远距离 waypoint 兜底策略：
+
+- 第一步：使用严格栅格规划。严格栅格要求地面点云连通，并叠加静态障碍、动态障碍和安全膨胀。
+- 第二步：如果动态障碍层导致失败，退回静态 preview 地图再规划一次。
+- 第三步：如果严格地面连通仍然失败，并且 `shortestPathUseRelaxedGroundFallback=true`，则使用放宽地面连通的兜底栅格。这个兜底只放宽“未知地面是否连通”，仍然保留障碍物膨胀和动态障碍叠加。
+- 第四步：如果兜底成功，RViz 会继续显示 `CurrentShortestPath`，终端会输出 warning 说明使用了 fallback。
+- 第五步：如果仍然失败，说明目标可能超出地图范围、附近没有自由格、被障碍完全包围，或者 preview 点云没有覆盖该区域。
+
+如果仍然没有路径，可尝试：
 
 - 换一个更近的目标点
 - 调整 `visualization_tools.launch` 里的 A* 栅格参数
 - 检查 preview 点云是否覆盖该区域
+- 调大 `shortestPathNearestFreeRadius`，让系统能在目标点附近搜索更远的自由格
+- 适当减小 `shortestPathObstacleInflation`，但不要小到让最短路径贴墙或穿障
 
 第二次或多次点击 waypoint 后，如果 `Path`、`Trajectory`、`ShortestPath` 历史都还在，但 `CurrentShortestPath` 突然不显示，通常表示当前 A* 在“静态地图 + 实时激光动态障碍”的合并栅格上没有找到可达路径。常见原因是车辆附近实时扫描点、墙边点云或窄通道被 `shortestPathDynamicObstacleInflation` 膨胀后临时堵住了起点、终点或通道。
 
-当前版本已增加兜底策略：
+当前版本已增加动态障碍兜底策略：
 
 - 优先使用静态 preview 地图 + 动态障碍层计算最短路径。
 - 如果动态障碍层导致 A* 失败，会自动退回静态 preview 地图再计算一次。
-- 如果兜底成功，RViz 会继续显示 `CurrentShortestPath`，终端会输出一条 warning 说明动态栅格临时堵住了路径。
-- 如果静态地图也失败，终端会输出具体失败原因，例如目标超出地图、附近没有自由格、A* 无法连通等。
+- 如果静态地图仍然因为地面点云稀疏而失败，会继续尝试 `shortestPathUseRelaxedGroundFallback`。
+- 如果兜底成功，RViz 会继续显示 `CurrentShortestPath`，终端会输出一条 warning 说明触发了哪一级 fallback。
+- 如果所有策略都失败，终端会输出具体失败原因，例如目标超出地图、附近没有自由格、A* 无法连通等。
 
 ### 10.3 为什么红色 ShortestPath 以前看起来会穿过障碍物
 
