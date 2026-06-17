@@ -119,7 +119,7 @@ ShortestPath
 - `CurrentShortestPath` 订阅 `/shortest_path`，显示当前 waypoint 对应的 A* 障碍物约束最短路径。
 - `ShortestPath` 订阅 `/shortest_path_history`，显示已经规划过的最短路径历史线段。
 
-这两条都不是简单直线。它们基于 preview 点云构建 2D 占据栅格，在考虑障碍物膨胀、地面可通行区域和动态障碍后，用 A* 算法求出可达最短路径。历史显示使用 `MarkerArray/LINE_STRIP`：每次点击 waypoint 并成功规划后，把这一整段理论最短路径追加到红色历史轨迹；下一次 waypoint 再追加下一整段，最终形成一条连续的理论最短路径轨迹，用来和实际 `Trajectory` 对比。历史线还会按 `shortestPathHistoryZOffset` 轻微抬高，并按 `shortestPathHistoryLineWidth` 加粗，避免被当前最短路径或实际轨迹遮住。
+这两条都不是简单直线。它们基于 preview 点云构建 2D 占据栅格，在考虑障碍物膨胀、地面可通行区域和动态障碍后，用 A* 算法求出可达最短路径。历史显示使用 `MarkerArray/LINE_STRIP`：每次点击 waypoint 并成功规划后，把这一整段理论最短路径追加到红色历史轨迹；下一次 waypoint 再追加下一整段，最终形成一条连续的理论最短路径轨迹，用来和实际 `Trajectory` 对比。历史线还会按 `shortestPathHistoryZOffset` 轻微抬高，并按 `shortestPathHistoryLineWidth` 加粗，避免被当前最短路径或实际轨迹遮住。RViz 的 `Waypoint` 工具一次点击会连续发布两次 `/way_point`，当前版本会用 `shortestPathWaypointDuplicateTime` 和 `shortestPathWaypointDuplicateDistance` 对重复目标点去重，避免第一个 waypoint 就重复追加两条红色历史线。
 
 ### 1.4 新增路径优化度日志
 
@@ -544,6 +544,7 @@ source install/setup.bash
 
 - `CurrentShortestPath`：仍使用 `/shortest_path` 的 `nav_msgs/msg/Path`，只显示当前目标的连续 A* 路径。
 - `ShortestPath`：改用 `/shortest_path_history` 的 `visualization_msgs/msg/MarkerArray`，内部使用 `LINE_STRIP` 按 waypoint 任务追加整段最短路径，形成连续红色理论最短路径轨迹。
+- 重复 waypoint 去重：`Waypoint` 工具一次点击会发布两次 `/way_point`，`visualizationTools` 会在短时间、近距离内只记录一次红色历史。
 
 因此历史最短路径不会再因为 RViz 自动补线而出现假穿障。如果 `CurrentShortestPath` 本身贴近障碍物，可以继续调大 `shortestPathObstacleInflation` 或 `shortestPathLineCheckRadius`。
 

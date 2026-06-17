@@ -960,6 +960,15 @@ waypoint 3 -> shortest path segment 3
 
 `CurrentShortestPath` 仍然表示当前 waypoint 的完整参考最短路；`ShortestPath` 历史则表示已经完成/规划过的多个 waypoint 理论最短路拼接轨迹。
 
+RViz 的 `Waypoint` 工具为了提高其它节点收到目标点的概率，会在一次点击中连续发布两次 `/way_point`。如果不处理，`visualizationTools` 会把同一个 waypoint 的同一条最短路径追加两次，看起来就像第一个 waypoint 出现两条红色历史线。当前版本使用两个参数做去重：
+
+```text
+shortestPathWaypointDuplicateTime = 0.2s
+shortestPathWaypointDuplicateDistance = 0.05m
+```
+
+如果两次 waypoint 时间差小于该阈值，并且目标点距离小于该阈值，第二次 waypoint 只刷新当前状态，不再重复追加红色 `ShortestPath` 历史。
+
 这项修改非常关键：旧版本如果把历史最短路径也作为 `nav_msgs/msg/Path` 发布，RViz 会强制连接所有相邻 pose。当前版本使用 marker 控制历史轨迹显示，并且只在 waypoint 成功规划时追加整段路径，避免车辆行驶中反复追加短前缀造成混乱。
 
 ## 7. 路径优化度日志是怎么生成的

@@ -65,6 +65,8 @@ double shortestPathLineCheckResolution = 0.05;
 double shortestPathLineCheckRadius = 0.15;
 double shortestPathHistoryLineWidth = 0.12;
 double shortestPathHistoryZOffset = 0.12;
+double shortestPathWaypointDuplicateTime = 0.2;
+double shortestPathWaypointDuplicateDistance = 0.05;
 bool shortestPathUseDynamicObstacles = true;
 double shortestPathDynamicObstacleMinZ = 0.2;
 double shortestPathDynamicObstacleMaxZ = 2.0;
@@ -112,6 +114,11 @@ vector<geometry_msgs::msg::Point> shortestPathPoints;
 vector<geometry_msgs::msg::Point> shortestPathHistoryLinePoints;
 bool shortestPathDynamicGridDirty = false;
 double shortestPathLastReplanTime = 0;
+double shortestPathLastHistoryWaypointTime = -1e6;
+float shortestPathLastHistoryGoalX = 0;
+float shortestPathLastHistoryGoalY = 0;
+float shortestPathLastHistoryGoalZ = 0;
+bool shortestPathLastHistoryGoalInited = false;
 
 pcl::VoxelGrid<pcl::PointXYZ> overallMapDwzFilter;
 pcl::VoxelGrid<pcl::PointXYZI> exploredAreaDwzFilter;
@@ -338,6 +345,29 @@ void appendShortestPathToHistory()
   for (size_t i = 1; i < shortestPathPoints.size(); i++) {
     shortestPathHistoryLinePoints.push_back(shortestPathPoints[i]);
   }
+
+  shortestPathLastHistoryWaypointTime = systemTime;
+  shortestPathLastHistoryGoalX = pathGoalX;
+  shortestPathLastHistoryGoalY = pathGoalY;
+  shortestPathLastHistoryGoalZ = pathGoalZ;
+  shortestPathLastHistoryGoalInited = true;
+}
+
+bool isDuplicateShortestPathWaypoint(const geometry_msgs::msg::PointStamped::ConstSharedPtr waypoint)
+{
+  if (!shortestPathLastHistoryGoalInited) {
+    return false;
+  }
+
+  double waypointTime = rclcpp::Time(waypoint->header.stamp).seconds();
+  if (fabs(waypointTime - shortestPathLastHistoryWaypointTime) > shortestPathWaypointDuplicateTime) {
+    return false;
+  }
+
+  float dx = waypoint->point.x - shortestPathLastHistoryGoalX;
+  float dy = waypoint->point.y - shortestPathLastHistoryGoalY;
+  float dz = waypoint->point.z - shortestPathLastHistoryGoalZ;
+  return sqrt(dx * dx + dy * dy + dz * dz) <= shortestPathWaypointDuplicateDistance;
 }
 
 void buildShortestPathGrid()
@@ -802,6 +832,7 @@ void replanIfDynamicObstaclesBlockShortestPath()
 
 void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr waypoint)
 {
+  bool duplicateWaypoint = isDuplicateShortestPathWaypoint(waypoint);
   pathStartX = vehicleX;
   pathStartY = vehicleY;
   pathStartZ = vehicleZ;
@@ -822,7 +853,9 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
     shortestPathDis = previousShortestPathDis;
     shortestPathInited = previousShortestPathInited;
   } else {
-    appendShortestPathToHistory();
+    if (!duplicateWaypoint) {
+      appendShortestPathToHistory();
+    }
     shortestPathLastReplanTime = systemTime;
   }
 
@@ -1030,6 +1063,8 @@ int main(int argc, char** argv)
   nh->declare_parameter<double>("shortestPathLineCheckRadius", shortestPathLineCheckRadius);
   nh->declare_parameter<double>("shortestPathHistoryLineWidth", shortestPathHistoryLineWidth);
   nh->declare_parameter<double>("shortestPathHistoryZOffset", shortestPathHistoryZOffset);
+  nh->declare_parameter<double>("shortestPathWaypointDuplicateTime", shortestPathWaypointDuplicateTime);
+  nh->declare_parameter<double>("shortestPathWaypointDuplicateDistance", shortestPathWaypointDuplicateDistance);
   nh->declare_parameter<bool>("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
   nh->declare_parameter<double>("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
   nh->declare_parameter<double>("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);
@@ -1061,6 +1096,8 @@ int main(int argc, char** argv)
   nh->get_parameter("shortestPathLineCheckRadius", shortestPathLineCheckRadius);
   nh->get_parameter("shortestPathHistoryLineWidth", shortestPathHistoryLineWidth);
   nh->get_parameter("shortestPathHistoryZOffset", shortestPathHistoryZOffset);
+  nh->get_parameter("shortestPathWaypointDuplicateTime", shortestPathWaypointDuplicateTime);
+  nh->get_parameter("shortestPathWaypointDuplicateDistance", shortestPathWaypointDuplicateDistance);
   nh->get_parameter("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
   nh->get_parameter("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
   nh->get_parameter("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);
