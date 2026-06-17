@@ -939,7 +939,16 @@ shortestPathLineCheckRadius = 0.15m
 /shortest_path_history
 ```
 
-消息类型为 `visualization_msgs/msg/MarkerArray`，RViz 中显示名称为 `ShortestPath`。内部使用 `Marker::LINE_LIST`，每两个点组成一条独立线段。这样可以累计显示多次 waypoint 或多次重规划的最短路径历史，同时不会让 RViz 把上一段路径终点和下一段路径起点自动连成一条不存在的直线。
+消息类型为 `visualization_msgs/msg/MarkerArray`，RViz 中显示名称为 `ShortestPath`。内部使用 `Marker::LINE_LIST`，每两个点组成一条独立线段。这样可以像 `Trajectory` 一样持续追加多次 waypoint 或多次重规划的最短路径历史，同时不会让 RViz 把上一段路径终点和下一段路径起点自动连成一条不存在的直线。
+
+为了避免第二段、第三段历史最短路径与 `CurrentShortestPath` 或实际轨迹重合后被遮住，历史 marker 还做了可视化偏移：
+
+```text
+shortestPathHistoryZOffset = 0.12m
+shortestPathHistoryLineWidth = 0.12m
+```
+
+这两个参数只影响 RViz 显示，不改变 A* 计算出的 `L_shortest`。
 
 这项修改非常关键：旧版本如果把历史最短路径也作为 `nav_msgs/msg/Path` 发布，RViz 会强制连接所有相邻 pose。重新规划或切换目标后，显示层会出现一条没有经过 A* 检查的假直线，看起来就像“红色最短路径穿过障碍物”。当前版本用 `LINE_LIST` 后，历史显示只画真实 A* 段内的线，不再跨段补线。
 

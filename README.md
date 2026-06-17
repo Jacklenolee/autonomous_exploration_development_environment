@@ -119,7 +119,7 @@ ShortestPath
 - `CurrentShortestPath` 订阅 `/shortest_path`，显示当前 waypoint 对应的 A* 障碍物约束最短路径。
 - `ShortestPath` 订阅 `/shortest_path_history`，显示已经规划过的最短路径历史线段。
 
-这两条都不是简单直线。它们基于 preview 点云构建 2D 占据栅格，在考虑障碍物膨胀、地面可通行区域和动态障碍后，用 A* 算法求出可达最短路径。历史显示使用 `MarkerArray/LINE_LIST`，每一小段独立绘制，避免 RViz 把不同规划片段自动连接成穿过障碍物的假直线。
+这两条都不是简单直线。它们基于 preview 点云构建 2D 占据栅格，在考虑障碍物膨胀、地面可通行区域和动态障碍后，用 A* 算法求出可达最短路径。历史显示使用 `MarkerArray/LINE_LIST`，每一小段独立绘制并持续追加，避免 RViz 把不同规划片段自动连接成穿过障碍物的假直线。历史线还会按 `shortestPathHistoryZOffset` 轻微抬高，并按 `shortestPathHistoryLineWidth` 加粗，避免被当前最短路径或实际轨迹遮住。
 
 ### 1.4 新增路径优化度日志
 
@@ -543,7 +543,7 @@ source install/setup.bash
 当前版本已修改为：
 
 - `CurrentShortestPath`：仍使用 `/shortest_path` 的 `nav_msgs/msg/Path`，只显示当前目标的连续 A* 路径。
-- `ShortestPath`：改用 `/shortest_path_history` 的 `visualization_msgs/msg/MarkerArray`，内部使用 `LINE_LIST` 独立绘制每一段历史线段。
+- `ShortestPath`：改用 `/shortest_path_history` 的 `visualization_msgs/msg/MarkerArray`，内部使用 `LINE_LIST` 独立绘制每一段历史线段，并像 `Trajectory` 一样持续追加。
 
 因此历史最短路径不会再因为 RViz 自动补线而出现假穿障。如果 `CurrentShortestPath` 本身贴近障碍物，可以继续调大 `shortestPathObstacleInflation` 或 `shortestPathLineCheckRadius`。
 

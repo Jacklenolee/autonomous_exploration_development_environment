@@ -63,6 +63,8 @@ double shortestPathGroundSearchRadius = 0.6;
 double shortestPathNearestFreeRadius = 3.0;
 double shortestPathLineCheckResolution = 0.05;
 double shortestPathLineCheckRadius = 0.15;
+double shortestPathHistoryLineWidth = 0.12;
+double shortestPathHistoryZOffset = 0.12;
 bool shortestPathUseDynamicObstacles = true;
 double shortestPathDynamicObstacleMinZ = 0.2;
 double shortestPathDynamicObstacleMaxZ = 2.0;
@@ -108,8 +110,6 @@ vector<unsigned char> shortestPathStaticGrid;
 vector<unsigned char> shortestPathDynamicObstacleGrid;
 vector<geometry_msgs::msg::Point> shortestPathPoints;
 vector<geometry_msgs::msg::Point> shortestPathHistoryLinePoints;
-size_t shortestPathCurrentHistoryStart = 0;
-bool shortestPathCurrentHistoryActive = false;
 bool shortestPathDynamicGridDirty = false;
 double shortestPathLastReplanTime = 0;
 
@@ -320,13 +320,6 @@ void appendShortestPathToHistory()
 {
   if (shortestPathPoints.size() < 2) {
     return;
-  }
-
-  if (!shortestPathCurrentHistoryActive) {
-    shortestPathCurrentHistoryStart = shortestPathHistoryLinePoints.size();
-    shortestPathCurrentHistoryActive = true;
-  } else if (shortestPathCurrentHistoryStart < shortestPathHistoryLinePoints.size()) {
-    shortestPathHistoryLinePoints.resize(shortestPathCurrentHistoryStart);
   }
 
   for (size_t i = 1; i < shortestPathPoints.size(); i++) {
@@ -703,8 +696,9 @@ void publishShortestPath(const builtin_interfaces::msg::Time& stamp)
   historyMarker.id = 0;
   historyMarker.type = visualization_msgs::msg::Marker::LINE_LIST;
   historyMarker.action = visualization_msgs::msg::Marker::ADD;
+  historyMarker.pose.position.z = shortestPathHistoryZOffset;
   historyMarker.pose.orientation.w = 1.0;
-  historyMarker.scale.x = 0.08;
+  historyMarker.scale.x = shortestPathHistoryLineWidth;
   historyMarker.color.r = 1.0;
   historyMarker.color.g = 0.31;
   historyMarker.color.b = 0.0;
@@ -804,10 +798,6 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
   pathGoalY = waypoint->point.y;
   pathGoalZ = waypoint->point.z;
   pathActualDis = 0;
-  size_t previousShortestPathHistoryStart = shortestPathCurrentHistoryStart;
-  bool previousShortestPathHistoryActive = shortestPathCurrentHistoryActive;
-  shortestPathCurrentHistoryStart = shortestPathHistoryLinePoints.size();
-  shortestPathCurrentHistoryActive = false;
   vector<geometry_msgs::msg::Point> previousShortestPathPoints = shortestPathPoints;
   float previousShortestPathDis = shortestPathDis;
   bool previousShortestPathInited = shortestPathInited;
@@ -820,8 +810,6 @@ void waypointHandler(const geometry_msgs::msg::PointStamped::ConstSharedPtr wayp
     shortestPathPoints = previousShortestPathPoints;
     shortestPathDis = previousShortestPathDis;
     shortestPathInited = previousShortestPathInited;
-    shortestPathCurrentHistoryStart = previousShortestPathHistoryStart;
-    shortestPathCurrentHistoryActive = previousShortestPathHistoryActive;
   } else {
     appendShortestPathToHistory();
     shortestPathLastReplanTime = systemTime;
@@ -1029,6 +1017,8 @@ int main(int argc, char** argv)
   nh->declare_parameter<double>("shortestPathNearestFreeRadius", shortestPathNearestFreeRadius);
   nh->declare_parameter<double>("shortestPathLineCheckResolution", shortestPathLineCheckResolution);
   nh->declare_parameter<double>("shortestPathLineCheckRadius", shortestPathLineCheckRadius);
+  nh->declare_parameter<double>("shortestPathHistoryLineWidth", shortestPathHistoryLineWidth);
+  nh->declare_parameter<double>("shortestPathHistoryZOffset", shortestPathHistoryZOffset);
   nh->declare_parameter<bool>("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
   nh->declare_parameter<double>("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
   nh->declare_parameter<double>("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);
@@ -1058,6 +1048,8 @@ int main(int argc, char** argv)
   nh->get_parameter("shortestPathNearestFreeRadius", shortestPathNearestFreeRadius);
   nh->get_parameter("shortestPathLineCheckResolution", shortestPathLineCheckResolution);
   nh->get_parameter("shortestPathLineCheckRadius", shortestPathLineCheckRadius);
+  nh->get_parameter("shortestPathHistoryLineWidth", shortestPathHistoryLineWidth);
+  nh->get_parameter("shortestPathHistoryZOffset", shortestPathHistoryZOffset);
   nh->get_parameter("shortestPathUseDynamicObstacles", shortestPathUseDynamicObstacles);
   nh->get_parameter("shortestPathDynamicObstacleMinZ", shortestPathDynamicObstacleMinZ);
   nh->get_parameter("shortestPathDynamicObstacleMaxZ", shortestPathDynamicObstacleMaxZ);

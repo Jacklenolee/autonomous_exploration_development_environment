@@ -23,6 +23,8 @@
     <param name="shortestPathNearestFreeRadius" value="3.0" />
     <param name="shortestPathLineCheckResolution" value="0.05" />
     <param name="shortestPathLineCheckRadius" value="0.15" />
+    <param name="shortestPathHistoryLineWidth" value="0.12" />
+    <param name="shortestPathHistoryZOffset" value="0.12" />
     <param name="shortestPathUseDynamicObstacles" value="true" />
     <param name="shortestPathDynamicObstacleMinZ" value="0.2" />
     <param name="shortestPathDynamicObstacleMaxZ" value="2.0" />
